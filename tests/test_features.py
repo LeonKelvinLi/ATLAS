@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -118,20 +119,21 @@ def test_mtf_align_only_takes_trend_values():
 
 
 def test_real_dataset_if_available():
-    """Smoke-run the pipeline over the live-collected canonical history
-    (same loader production train.py uses)."""
-    db_file = Path(__file__).resolve().parent.parent / "market.duckdb"
-    if not db_file.exists():
-        pytest.skip("no collected dataset")
-    from storage import load_canonical_history, open_db
+    """Opt-in smoke test against an explicitly selected local dataset copy.
 
-    try:
-        conn = open_db(db_file)
-    except Exception as exc:
-        # A collector or backfill run holds a write lock; that is normal
-        # operation, not a test failure for an "if available" smoke test.
-        pytest.skip(f"dataset busy: {type(exc).__name__}")
-    candles, report = load_canonical_history(conn, "EURUSD", 60)
+    The default suite never opens market.duckdb, and this path never invokes
+    open_db(), which creates tables and migrates schema on an existing file.
+    """
+    dataset_path = os.environ.get("ATLAS_TEST_DATASET")
+    if not dataset_path:
+        pytest.skip("set ATLAS_TEST_DATASET to opt in with a local DuckDB copy")
+    db_file = Path(dataset_path).expanduser().resolve()
+    assert db_file.is_file(), f"ATLAS_TEST_DATASET does not exist: {db_file}"
+    import duckdb
+    from storage import load_canonical_history
+
+    with duckdb.connect(str(db_file), read_only=True) as conn:
+        candles, report = load_canonical_history(conn, "EURUSD", 60)
     if report["candles"] < 600:
         pytest.skip("not enough accumulated history yet")
     out = build_features(candles, horizon=5)

@@ -4,11 +4,18 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from features import FEATURE_COLUMNS  # noqa: E402
-from train import decide_action, feature_hash, make_signal, walk_forward  # noqa: E402
+from train import (  # noqa: E402
+    ChronoCalibratedModel,
+    decide_action,
+    feature_hash,
+    make_signal,
+    walk_forward,
+)
 
 
 def synthetic_features(n: int = 1200, predictive: bool = True, seed: int = 7) -> pd.DataFrame:
@@ -65,6 +72,23 @@ def test_feature_hash_is_stable():
 
 
 # ---------------- walk-forward integrity ----------------
+
+@pytest.mark.parametrize("initial_class", [0.0, 1.0])
+def test_calibration_handles_single_class_early_fold(initial_class):
+    """A one-class prefix must still yield valid calibrated probabilities."""
+    frame = synthetic_features(n=400)
+    X = frame[FEATURE_COLUMNS]
+    y = pd.Series(np.full(400, initial_class))
+    y.iloc[120:] = np.arange(280) % 2
+    # The first purged fold has 95 same-class training rows, while its
+    # later validation block and the full window both contain two classes.
+    model = ChronoCalibratedModel().fit(X, y)
+    predicted = model.predict_proba_up(X.iloc[-20:])
+    assert model.calibrator_ is not None
+    assert predicted.shape == (20,)
+    assert np.isfinite(predicted).all()
+    assert ((predicted >= 0) & (predicted <= 1)).all()
+
 
 def test_folds_are_temporally_ordered_with_gap():
     result = walk_forward(synthetic_features(), payout=0.85, n_splits=4, horizon=5)

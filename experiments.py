@@ -16,7 +16,7 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent
 LEDGER_PATH = PROJECT_DIR / "experiments.jsonl"
-LOCK_PATH = PROJECT_DIR / "requirements.lock"
+LOCK_PATH = PROJECT_DIR / "uv.lock"
 
 
 def _sha256_file(path: Path) -> str | None:
@@ -64,6 +64,7 @@ def record_experiment(
         "feature_code_hash": _sha256_file(PROJECT_DIR / "features.py"),
         "train_code_hash": _sha256_file(PROJECT_DIR / "train.py"),
         "lock_hash": _sha256_file(LOCK_PATH),
+        "lock_file": LOCK_PATH.name,
         "parameters": parameters,
         "fold_ranges": fold_ranges,
         "payout_source": payout_source,

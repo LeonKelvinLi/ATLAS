@@ -2,29 +2,37 @@
 unrecoverable - these pin failure modes an audit actually found.
 """
 
+import json
+import pickle
 import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 
-def test_load_bundle_warning_branch_does_not_raise_nameerror():
+def test_load_bundle_warning_branch_does_not_raise_nameerror(
+        monkeypatch, tmp_path, capsys):
     """meta-h3.pkl carries no data_end_ts, so load_bundle's 'cannot verify'
     warning branch executes on EVERY run. It referenced sys.stderr while the
     module never imported sys, raising NameError - and main() caught only
     SystemExit, so it would have killed the leak-immune paper track too.
     """
-    pytest.importorskip("lightgbm")
-    from forward_eval import load_bundle
+    import forward_eval
 
-    if not (PROJECT_DIR / "models" / "meta-h3.pkl").exists():
-        pytest.skip("models/meta-h3.pkl not present")
-    name, bundle = load_bundle("meta-h3.pkl", 1784678400)
+    # Exercise the metadata branch with our own fixture, without unpickling
+    # private model artifacts or requiring a collected forward window.
+    expected = {"meta": {"trained_on": "synthetic test fixture"}}
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    (model_dir / "meta-h3.pkl").write_bytes(pickle.dumps(expected))
+    monkeypatch.setattr(forward_eval, "PROJECT_DIR", tmp_path)
+    name, bundle = forward_eval.load_bundle("meta-h3.pkl", 1784678400)
     assert name == "meta-h3.pkl"
-    assert isinstance(bundle, dict)
+    assert bundle == expected
+    warning = capsys.readouterr().err
+    assert "post-cutoff guard could NOT verify this bundle" in warning
+    assert "synthetic test fixture" in warning
 
 
 def test_forward_eval_imports_sys_for_its_stderr_writes():
@@ -42,22 +50,33 @@ def test_candles_track_failure_cannot_kill_the_paper_track():
         "a candles-track failure is not broadly contained")
 
 
-@pytest.mark.parametrize("module", [
+OPERATIONAL_MODULES = [
     "forward_eval.py", "live_h2_runner.py", "mission_control.py",
     "settle_missing.py", "probe_execution.py", "probe_order_record.py",
     "selfcheck.py", "watchdog.py", "catchup_gaps.py", "extra_collect.py",
     "backup_state.py", "status.py", "dashboard.py",
-])
-def test_no_undefined_names(module):
+]
+
+
+def test_no_undefined_names():
     """Catch the whole CLASS of the sys-import bug: pylint's undefined-variable
     check over every operational module. A NameError on a rarely-taken branch
     is exactly the kind of defect that only shows up when it matters."""
     out = subprocess.run(
         [sys.executable, "-m", "pylint", "--disable=all",
-         "--enable=E0602,E0601,E1101", "--score=n", module],
+         "--enable=E0602,E0601", "--score=n", "--persistent=n",
+         "--output-format=json", *OPERATIONAL_MODULES],
         cwd=PROJECT_DIR, capture_output=True, text=True, timeout=300)
-    # E1101 (no-member) can false-positive on C extensions; only fail on the
-    # undefined-name families that are unambiguous.
-    hard = [ln for ln in out.stdout.splitlines()
-            if ": E0602" in ln or ": E0601" in ln]
-    assert not hard, "undefined names:\n" + "\n".join(hard)
+    # One process amortizes import analysis across all modules. E1101 was
+    # deliberately ignored for C-extension false positives; leave it disabled
+    # instead of spending time computing diagnostics that cannot fail a test.
+    # Pylint uses a bitmask: 2 means error diagnostics. Missing pylint,
+    # crashes, fatal errors and invalid invocations must not silently pass.
+    assert out.returncode in (0, 2), (
+        f"pylint did not complete (exit {out.returncode}):\n"
+        f"{out.stderr}\n{out.stdout}")
+    messages = json.loads(out.stdout)
+    assert isinstance(messages, list), "pylint did not return a diagnostic list"
+    if out.returncode == 2:
+        assert messages, "pylint failed without producing diagnostic evidence"
+    assert not messages, "pylint errors:\n" + json.dumps(messages, indent=2)

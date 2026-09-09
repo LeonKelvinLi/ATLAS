@@ -1,20 +1,25 @@
 [project]
 name = "atlas-iqoption"
 version = "0.1.0"
-description = "IQ Option demo-only data, features and walk-forward pipeline (validation by MIDAS)"
+description = "FX research pipeline with causal features, purged validation, and optional IQ Option demo integration"
 requires-python = ">=3.12"
 dependencies = [
-  "mcp",
+  "mcp>=1.28,<2",
   "duckdb",
   "pandas",
   "pandera",
   "pyarrow",
   "ta",
   "scikit-learn",
+  "numpy",
+  "scipy",
 ]
 
+[project.optional-dependencies]
+research = ["lightgbm", "optuna", "histdata"]
+
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest", "pylint", "lightgbm", "optuna"]
 
 [tool.pytest.ini_options]
 # Only the project's own tests; vendor/ contains the vendored iqoptionapi

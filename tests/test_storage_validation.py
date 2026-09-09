@@ -87,6 +87,39 @@ def test_wrong_bar_duration_rejected():
     with pytest.raises(pandera.errors.SchemaError):
         validate_candles(pd.DataFrame(candles), 60)
 
+
+@pytest.mark.parametrize("interval", [0, -60])
+def test_nonpositive_interval_rejected(interval):
+    with pytest.raises(ValueError, match="interval must be positive"):
+        validate_candles(pd.DataFrame(make_candles(2)), interval)
+
+
+@pytest.mark.parametrize("spacing, error", [
+    (30, "consecutive bars must not overlap"),
+    (90, "bar spacing must be whole multiples"),
+])
+def test_overlapping_or_misaligned_bar_spacing_rejected(spacing, error):
+    candles = make_candles(2)
+    candles[1]["from_ts"] = candles[0]["from_ts"] + spacing
+    candles[1]["to_ts"] = candles[1]["from_ts"] + 60
+    with pytest.raises(pandera.errors.SchemaError, match=error):
+        validate_candles(pd.DataFrame(candles), 60)
+
+
+@pytest.mark.parametrize("spacing", [60, 120, 180])
+def test_whole_bar_spacing_allows_any_initial_phase(spacing):
+    start = 1_000_001  # Deliberately not a multiple of the 60-second interval.
+    candles = make_candles(1, start=start) + make_candles(1, start=start + spacing)
+    frame = validate_candles(pd.DataFrame(candles), 60)
+    assert len(frame) == 2
+    expected = [] if spacing == 60 else [{
+        "after_ts": start,
+        "resume_ts": start + spacing,
+        "missing": spacing // 60 - 1,
+    }]
+    assert gap_report(frame, 60) == expected
+
+
 def test_high_below_close_rejected():
     candles = make_candles(5)
     candles[1]["high"] = 1.00  # below open/close/low

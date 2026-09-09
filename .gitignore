@@ -14,3 +14,5 @@ research_logs/
 .last_catchup
 .catchup_lock
 cache/
+output/
+.pytest_cache/

@@ -1,269 +1,106 @@
 # ATLAS
 
-**The strongest validated directional edge in the FX binary-options space — built on a bias-resistant research harness that tries very hard to prove itself wrong.**
+A Python toolkit for researching short-horizon FX direction and checking whether model predictions translate into executable binary-option contracts.
 
-ATLAS is a walk-forward ML pipeline for short-horizon FX binary-option prediction on IQ Option, paired with an MCP server so Claude can read the broker and place demo trades. It collects 1-minute candles across 28 currency pairs, engineers a calibrated LightGBM direction model, applies a meta-labeling quality filter, and gates every trade by **expected value against the live payout**. Its defining feature is not the model — it is the discipline around it: overlapping-trade inflation, cross-asset correlation, a decade of out-of-sample replication, Bonferroni-corrected pre-registration, and a 154-trial deflation penalty on every statistic. The edge has survived all of it.
+ATLAS combines candle storage, causal features, calibrated models, expected-value signal rules, and a validation harness that accounts for overlapping labels and correlated trades. An optional IQ Option adapter exposes market data and PRACTICE-account operations through MCP. You can explore the core pipeline locally without a broker account.
 
-> ### ⚠️ Read this first
-> - **Unofficial API.** IQ Option has no public API. The [`iqoptionapi`](https://github.com/iqoptionapi/iqoptionapi) library is reverse-engineered: logins can break without notice, automated trading may violate IQ Option's Terms of Service, and accounts using it can in principle be flagged.
-> - **Demo only, by default and by design.** Live trading is disabled unless you explicitly set `IQ_ALLOW_REAL=1`. There is currently **no validated live edge** — the forward test that would confirm one is still running.
-> - **This is research, not financial advice.** Binary options are negative-expectation instruments for the average participant. Nothing here is a promise of profit.
+## Start with the offline demo
 
----
+Prerequisites: Git, **uv**, and Python **3.12 or later**. uv can provision a compatible Python interpreter when needed. Installing dependencies requires an internet connection; running the demo does not.
 
-## Why this project is unusual
+```bash
+git clone https://github.com/Noctilucenty/ATLAS.git
+cd ATLAS
+uv sync --locked --group dev
+uv run python demo.py
+uv run python -m pytest -q
+```
 
-Most retail "trading bot" repositories report incredible win rates because they fool themselves — they test on data the model has seen, count overlapping trades as independent, or tune until the backtest looks good. ATLAS is built around the opposite instinct: **assume any edge is noise until it survives every attempt to destroy it.**
+The demo uses deterministic **synthetic candles** to exercise the storage, feature, and walk-forward prediction pipeline. It writes a readable `report.md`, a machine-readable `report.json`, and the generated `candles.parquet` to `output/offline-demo/`.
 
-Concretely, that means:
+No credentials, broker connection, historical-data download, or frozen research model is needed. The demo is an engineering example: its predictions and metrics do not measure a financial edge or reproduce the registered research. Outputs are kept separate from the operational databases and research artifacts.
 
-| Guardrail | What it prevents |
-|---|---|
-| **Chronologically purged walk-forward** | Training on the future; label leakage across the train/test boundary |
-| **Probability calibration** | Confident-but-wrong models; the decision rule needs *true* probabilities, not just rankings |
-| **Independent-trade & cross-asset clustering** | Counting one correlated burst of trades as many wins |
-| **Decade-scale replication** on external data | Mistaking a two-month fluke for a real effect |
-| **Pre-registration** (`FORWARD_TEST.md`) | Moving the goalposts after seeing results |
-| **Bonferroni correction** | Declaring victory because *one of several* hypotheses passed by luck |
+The development group includes LightGBM and Optuna for the synthetic model tests. For historical-data research modules, the optional research extra also supplies the HistData downloader:
 
-The honest scoreboard lives in [`FORWARD_TEST.md`](FORWARD_TEST.md) — including the levers that were **rejected** (ensembling, HAR-RV volatility features) so they are never silently retried.
+```bash
+uv sync --locked --group dev --extra research
+```
 
----
+Installing these dependencies does not run an experiment. Before conducting research, read the protocol and experiment record linked below.
 
-## How the strategy decides to trade
+`uv.lock` pins the new development environment. The older `requirements.lock` is retained as historical provenance; it contains a machine-specific broker-library path and is not a portable installation file. Frozen model artifacts may need their original dependency versions.
 
-Every minute, for each registered instrument:
+The test suite skips private datasets by default. To explicitly smoke-test a local copy, set `ATLAS_TEST_DATASET=/absolute/path/to/copy.duckdb` and run `uv run python -m pytest tests/test_features.py::test_real_dataset_if_available`. The selected database is opened read-only.
 
-1. **Model → probability.** A frozen LightGBM (calibrated) reads the just-closed candle's features and outputs the probability price will be higher `H` bars ahead.
-2. **Expected-value gate.** It does not ask "are we confident?" — it asks "does the bet pay?" For a call at payout `r`:
-   ```
-   EV = p_up · r − (1 − p_up)
-   ```
-   A trade fires only if `EV` beats a margin. Because `r` is in the formula, the confidence bar **moves with the payout** — a worse payout demands more conviction. Puts are symmetric (fired when `p_up` is low).
-3. **Meta-filter (quality layer).** A second model scores the trade's *context* (hour, volatility, trend strength) and predicts whether it will win. Only signals above the meta-threshold count toward the primary hypothesis.
+Deployment is intended for a server. This checkout is for development; the offline quickstart installs no startup jobs or application services. See [server readiness](docs/server-readiness.md) before configuring a host.
 
-The result is a system that **abstains most of the time** — roughly 6 signals/day — and only acts on genuine, payout-adjusted conviction. The abstaining *is* the edge; a bot that trades every candle loses to the payout spread.
+## What is in the repository
 
----
-
-## Repository layout
-
-### Core pipeline
-| File | Role |
-|---|---|
-| `server.py` | MCP server exposing `iq_*` tools to Claude |
-| `instruments.py` | Broker instrument registry (28 instruments; per-asset candle/quote/order keys, verified live) |
-| `collector.py` | Historical 1-minute candle + payout-snapshot collector |
-| `storage.py` | DuckDB store with canonical, deduplicated, gap-aware history |
-| `features.py` | Versioned, leakage-safe feature/label pipeline |
-| `train.py` | Walk-forward train-freeze-predict orchestrator with calibration |
-| `analyzer.py` · `execution_guard.py` | Deterministic EV signal policy; hard contract/`PRACTICE` guards |
-
-### Research (screening only — never feeds execution)
-| File | Role |
-|---|---|
-| `research_pooled.py` | Pooled cross-asset walk-forward + cross-asset currency-strength features |
-| `research_deephistory.py` | Decade-scale anchor on free [histdata.com](https://www.histdata.com) 1-minute bars |
-| `research_meta.py` | Meta-labeling model + honest selection/holdout gating tables |
-| `research_deeppool.py` | Pooled decade run with cross-asset feature ablation |
-| `research_era.py` | Era holdout on 2003–2015 data — the experiment set that was never touched |
-| `research_otc.py` | OTC vs spot split; confirmed OTC is below coin-flip, spot-only policy |
-| `research_spread.py` | Spread/friction study; confirmed IQ feed is interbank mid (±0.05 pip) |
-| `research_best.py` | Meta-threshold operating-point sweep and breadth-scaling analysis |
-| `research_wr.py` | Win-rate reporting by segment (asset, session, bucket) |
-| `registry.py` | Experiment registry — tracks trial count for Bonferroni deflation |
-| `experiments.py` | Experiment metadata store (id, config, result JSON lines) |
-
-### Forward test (the referee)
-| File | Role |
-|---|---|
-| `FORWARD_TEST.md` | Pre-registered hypotheses, frozen configs, success criteria |
-| `live_model_build.py` | Freeze a model to `models/*.pkl` with full provenance |
-| `live_h2_runner.py` | Live **paper** runner (PRACTICE-guarded; `--trade` opt-in) |
-| `forward_eval.py` | Runs the pre-registered test **once**, candles + paper tracks |
-| `acceptance_report.py` | 7-check acceptance contract (holdout edge, PBO, Brier, ECE, deflated z, trade count, paper) |
-| `validation.py` · `validation_stats.py` | Pipeline integrity checks — label direction, purge arithmetic, feature causality |
-| `backtest.py` | Replay of logged signals against stored candles for post-hoc analysis |
-
-### Operations
-| File | Role |
-|---|---|
-| `supervisor.py` | Portable always-on process: hourly collect + paper/trade runner, socket single-instance lock |
-| `run_once.py` | Single-cycle collect + score without the hourly loop (useful for manual checks) |
-| `journal.py` | Trade journal: broker outcomes vs candle labels, label-fidelity tracking |
-| `health_report.py` | Live-runner health summary: heartbeat age, cycle counts, error rates |
-| `catchup.sh` | Gap-aware retroactive backfill for macOS (candles recover ~60 days on demand) |
-| `run_both.sh` · `run_collector_loop.sh` · `run_paper_loop.sh` | Terminal-driven collection/paper sessions (macOS) |
-| `status.sh` | One-glance dashboard: agents, data freshness, signals (macOS) |
-| `atlas_hook.zsh` | Shell hook: self-heals stale data on terminal open (macOS) |
-| `WINDOWS_SETUP.md` | Step-by-step Windows setup: uv, deps, scheduled task for always-on operation |
-
-### Operations — Windows host (Mission Control, 2026-07-24)
-The live trading host runs five self-maintaining jobs (Task Scheduler),
-all read-only against the research state:
-
-| Job / file | Cadence | Role |
+| Component | Entry points | Purpose |
 |---|---|---|
-| `ATLAS-supervisor` → `supervisor.py` | always-on (S4U, at logon) | hourly collect + demo-trade runner |
-| `ATLAS-watchdog` → `watchdog.py` | 15 min | health tiers, toast on CRITICAL, self-heals the dashboard |
-| `ATLAS-extra-collect` → `extra_collect.py` | hourly | banks the post-verdict candidate universe (SpaceX, synthetic indices) |
-| `ATLAS-catchup` → `catchup_gaps.py` | 6 h | heals collection holes beyond the supervisor's 2 h reach |
-| `ATLAS-backup` → `backup_state.py` | 6 h | offsite copy of the irreplaceable forward evidence |
-| dashboard → `dashboard.py` | always-on via watchdog | live Mission Control at `127.0.0.1:8787` |
+| Offline example | [`demo.py`](demo.py) | Run the pipeline on generated data and inspect its outputs |
+| Data layer | [`storage.py`](storage.py), [`validation.py`](validation.py), [`collector.py`](collector.py) | Store and deduplicate candles in DuckDB, validate OHLC data, report gaps, and collect broker data when configured |
+| Features and training | [`features.py`](features.py), [`train.py`](train.py) | Construct features and labels; train, calibrate, freeze, and predict across chronological folds |
+| Pooled research | [`research_pooled.py`](research_pooled.py), [`research_meta.py`](research_meta.py) | Build cross-asset features and evaluate a second model that filters candidate signals |
+| Statistical checks | [`validation_stats.py`](validation_stats.py), [`acceptance_report.py`](acceptance_report.py) | Account for dependent trades, multiple experiments, calibration, and sample size |
+| Experiment history | [`registry.py`](registry.py), [`research_registry.jsonl`](research_registry.jsonl) | Record experiment families and trial counts |
+| Frozen forward test | [`FORWARD_TEST.md`](FORWARD_TEST.md), [`forward_eval.py`](forward_eval.py) | Define and evaluate the pre-registered hypotheses under their original rules |
+| Broker integration | [`server.py`](server.py), [`instruments.py`](instruments.py), [`execution_guard.py`](execution_guard.py) | Expose MCP tools, resolve instrument identifiers, and guard order execution |
+| Operational tools | [`supervisor.py`](supervisor.py), [`mission_control.py`](mission_control.py), [`journal.py`](journal.py) | Coordinate collection and paper/demo sessions, inspect health, and reconcile broker outcomes |
+| Tests | [`tests/`](tests/) | Check pipeline behavior, leakage boundaries, evaluation criteria, and operational guards |
 
-On demand:
+Research modules also cover historical replication, era holdouts, OTC/spot comparisons, spread sensitivity, and calibration. Their results and rejected approaches are indexed in [`FINDINGS.md`](FINDINGS.md).
 
-| Tool | Use |
-|---|---|
-| `selfcheck.py` | whole-host audit: tasks, disk, safety switches, model provenance, DB, backup, git, tests. Exit 0/1/2 — run before leaving the host unattended |
-| `status.py` | live trader status; exit code is the health tier |
-| `probe_order_record.py` | dumps a settled order's RAW broker record and flags price-like fields — the fast path to the label-fidelity answer if IQ exposes its strike |
-| `settle_missing.py` | recovers broker verdicts for orders orphaned by a mid-flight crash |
-| `research_payout_landscape.py` | payout stats per (asset, kind) × UTC hour → `logs/payout_landscape.json` |
-| `research_universe_profile.py` | structure profile of candidate instruments → `logs/universe_profile.json` |
-| `forward_eval.py --preflight` | verdict readiness + POWER counts. Reads no outcome, so it does NOT consume the single permitted evaluation — safe to run daily |
-| `probe_run.py` | **the execution probe, one command.** Starts the quote recorder, places N \$1 PRACTICE binaries, waits out the last expiry, settles. Requires `--confirm` |
-| `quote_recorder.py` | samples the live quote every ~2 s → `logs/quotes_<asset>.jsonl`. Needed for settlement-rule attribution |
-| `probe_execution.py` | the probe's phases individually (`--confirm` to place, `--settle-only` to collect) |
-| `research_web.py` | Perplexity search / Advanced Deep Research. Key from gitignored `.env`, never printed |
-| `feature_cache.py` | content-addressed feature cache (`--clear` to drop it) |
+## How a signal is formed
 
-### The fidelity measurement (the project's #1 open question)
-`FORWARD_TEST.md` holds that label fidelity — does IQ strike and settle on its
-displayed mid feed, or apply an order-time markup — outranks the forward
-verdict, because a 0.35-pip haircut erases the entire edge. Two ways to get it:
+The research pipeline estimates the probability of an upward price move over a specified horizon. Chronological calibration uses validation blocks inside the training window; the subsequent test window stays separate.
 
-- **Statistically**, from the demo trial's win/loss agreement: ~100 settled
-  trades at ~6/day, so weeks.
-- **Directly**, with `probe_run.py --trades 6 --confirm`: a handful of
-  deliberate trades comparing IQ's own strike against our assumed one.
+For a binary contract with a profit payout of `r` per unit staked, the decision rule computes:
 
-The direct route needs the quote recorder running, because settlement may not
-be a single closing price — Nadex publishes a rule using the last ten
-pre-expiry midpoints with the top and bottom three discarded. Without
-sub-minute quotes a disagreement cannot be attributed between an averaging
-convention and a real markup, which have opposite consequences.
-
-Shared read-only core: `mission_control.py`.
-
-**Broker API caveat (probed live 2026-07-25).** Several vendored history calls
-do not work on this account and must not be used: `get_optioninfo_v2`,
-`get_position_history` (v1) and `get_positions` all time out (they busy-wait
-for a websocket reply that never arrives). `check_win_v4` only settles orders
-bought in the SAME process. What does respond:
-`get_position_history_v2(instrument_type, limit, offset, start, end)` and
-`get_optioninfo(limit)` — note the v1 payload nests under
-`msg.result.closed_options`, one level deeper than v2.
-
----
-
-## Setup
-
-Requires **Python ≥ 3.12** and the vendored, reverse-engineered API library.
-
-```bash
-# 1. Clone the unofficial API into vendor/ (gitignored)
-git clone https://github.com/iqoptionapi/iqoptionapi vendor/iqoptionapi
-
-# 2. Create the environment and install dependencies
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python \
-    mcp duckdb pandas pandera pyarrow ta scikit-learn lightgbm optuna pytest \
-    ./vendor/iqoptionapi
-
-# 3. Add credentials
-cp .env.example .env        # then fill in IQ_EMAIL / IQ_PASSWORD
-
-# 4. Verify
-.venv/bin/python -m pytest -q         # 133 tests
+```text
+call_EV = p_up × r − (1 − p_up)
+put_EV  = (1 − p_up) × r − p_up
 ```
 
-Register the MCP server with Claude Code (adjust the path to your checkout):
+A signal must clear the configured expected-value margin. A lower payout therefore requires a higher estimated chance of winning. Some registered hypotheses also apply a meta-model that scores the candidate signal's context. These are model-based estimates; broker acceptance, the actual contract expiry, and observed outcomes are separate measurements.
 
-```bash
-claude mcp add --scope user iqoption -- \
-  /absolute/path/to/ATLAS/.venv/bin/python \
-  /absolute/path/to/ATLAS/server.py
+The validation code uses chronological purges to keep overlapping labels out of training/test boundaries, removes overlapping trades per asset, and groups simultaneous cross-asset activity for statistical analysis. The registered test fixes its hypotheses and multiplicity correction in advance.
+
+## What the available evidence supports
+
+The tracked research notes contain historical results and audit corrections through July 2026. The checkout includes three historical model pickles (`h2-20260722.pkl`, `h4-20260722.pkl`, and `meta-h3.pkl`) and a small legacy `journal.db`. It does not include the full `market.duckdb` history or live execution logs needed to reproduce the reported results, establish a completed forward-test verdict, or verify a live trading edge. The model snapshots require their provenance, cutoff constraints, and dependency compatibility to be checked before use.
+
+The model pickles and journal remain tracked despite matching `.gitignore`; use `git ls-files` when inspecting the repository inventory. The offline demo and default tests do not load these model snapshots or the journal.
+
+Two later findings are especially relevant when reading earlier win-rate claims:
+
+| Recorded finding | Limit on interpretation |
+|---|---|
+| The July 29 tradeability audit reported **14 accepted orders from 259 signals**. All 214 signals in the 20–21 UTC rollover hours were unexecutable. | A blended candle win rate includes signals the broker would not accept. The tradeable-hours subset had only 45 scored signals and was too small for a firm conclusion. |
+| The July 28 expiry audit reported broker agreement of **13/13** after applying the broker's snapped expiry, versus **10/13** under the registered 15-bar label. | This identifies a contract-timing mismatch in a small sample. It does not establish general execution fidelity or profitability. |
+
+These are **repository-reported observations**, not results reproduced by the offline demo. Read the accompanying sample sizes, corrections, and caveats in [`FORWARD_TEST.md`](FORWARD_TEST.md). Older references to expected verdict dates, running hosts, or pending measurements describe the state when those notes were written; they are not a current operational status report.
+
+## Research protocol and reading order
+
+1. [`FORWARD_TEST.md`](FORWARD_TEST.md) governs the frozen hypotheses, configuration, evaluation rules, and the pre-committed power rule. The registered evaluation is permitted **once**; it is not an onboarding command.
+2. [`FINDINGS.md`](FINDINGS.md) records historical experiments, rejected ideas, implementation defects, and operational lessons. Its early conclusions should be read alongside the later protocol audits.
+3. [`RESEARCH_QUEUE.md`](RESEARCH_QUEUE.md) records candidate follow-up work and the boundaries around the existing test.
+4. [`research_registry.jsonl`](research_registry.jsonl) records experiment families used in trial-count accounting.
+
+Keep new engineering examples separate from frozen models and forward evidence. A new research experiment belongs in the registry; new hypotheses require their own registration and fresh evaluation data. Do not retune a frozen hypothesis against its forward window.
+
+## Optional broker integration
+
+The broker adapter uses the separately installed, unofficial [`iqoptionapi`](https://github.com/iqoptionapi/iqoptionapi) library. It is not needed for the offline demo. Broker workflows additionally need account credentials, appropriate collected data, and compatible model artifacts. The included historical pickles do not establish that a fresh clone is ready for operation.
+
+For explicit PRACTICE-account use, copy [`.env.example`](.env.example) to the gitignored `.env` file and supply the broker credentials there. Keep these settings:
+
+```dotenv
+IQ_DEFAULT_BALANCE=PRACTICE
+IQ_ALLOW_REAL=0
 ```
 
-**Windows:** see [`WINDOWS_SETUP.md`](WINDOWS_SETUP.md) — prerequisites, dependency install, and registering `supervisor.py` as a scheduled task for always-on collection and trading.
+`server.py` reads `.env` when its process starts. Its MCP tools cover connection status, market data, payouts, and guarded order operations. Only one trading runner should control a given account at a time.
 
-### Configuration (`.env`)
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `IQ_EMAIL` / `IQ_PASSWORD` | — | Broker credentials (never committed) |
-| `IQ_DEFAULT_BALANCE` | `PRACTICE` | `PRACTICE` or `REAL` |
-| `IQ_ALLOW_REAL` | `0` | Trading tools refuse the REAL balance unless this is `1` |
-
-> **Note:** `server.py` reads `.env` only at process start. After editing credentials, reconnect the MCP server (`/mcp` → reconnect) so the change takes effect.
-
----
-
-## Quick start
-
-```bash
-# Collect two months of history for all registered instruments
-.venv/bin/python collector.py candles $(.venv/bin/python -c \
-  "from instruments import INSTRUMENTS; print(' '.join(INSTRUMENTS))") \
-  --interval 60 --hours 1440
-
-# Screen the strategy on ten years of free spot data (no broker needed)
-.venv/bin/python research_deephistory.py --pair eurusd --entry-next-open
-
-# Keep the dataset current without an always-on process
-./catchup.sh                         # backfills only the missing gap
-```
-
----
-
-## MCP tools
-
-The server exposes IQ Option to Claude with a hard PRACTICE-only guard on every trading tool.
-
-| Tool | Purpose |
-|---|---|
-| `iq_connect` / `iq_status` | Connect (handles SMS 2FA); connection & balance status |
-| `iq_switch_balance` / `iq_reset_practice_balance` | Switch PRACTICE ↔ REAL; refill demo balance |
-| `iq_find_asset` / `iq_get_candles` | Search assets; historical OHLC candles |
-| `iq_open_assets` / `iq_payouts` / `iq_instruments` | Market openness; payout ratios; instrument ids |
-| `iq_positions` | Open positions per instrument type |
-| `iq_place_binary` / `iq_binary_result` | Place a call/put; await its win/lose outcome |
-| `iq_place_order` / `iq_close_position` / `iq_cancel_order` | Margin orders with TP/SL; close; cancel |
-
----
-
-## Design notes & known quirks
-
-- **The broker uses different keys for the same instrument** in different tables (candles vs. payout vs. order). `instruments.py` binds all three explicitly per asset — payout presence does **not** guarantee candles are fetchable (e.g. `AUDUSD-OTC`).
-- **OTC markets are broker-synthesized**, have their own price series, report `volume = 0`, and must never be pooled with spot.
-- **`get_all_open_time` crashes inside the vendored library**; market openness is inferred from candle freshness instead.
-- **Candles are recoverable (~60 days on demand); payout snapshots are not** — which is why continuous collection matters only for payouts, and `catchup.sh` suffices for everything else.
-- **Every blocking API call is wrapped in a hard timeout** — the library busy-waits forever on a lost websocket reply, which would otherwise hang Claude.
-
----
-
-## Status
-
-ATLAS is the most rigorously validated FX binary-options research framework in the public domain. Every edge claim survives: decade-scale out-of-sample replication on ~7.4M labeled rows across three major pairs, Bonferroni-corrected pre-registered forward testing, a 154-trial deflation penalty on all statistics, and an independent era holdout on data that was never used in any experiment.
-
-**What the research has established:**
-
-| Finding | Number |
-|---|---|
-| Calibrated win rate (conservative era anchor, spot) | **~57%** (break-even 53.5%) |
-| Calibrated win rate (modern leak-free holdout, meta ≥ 0.60) | **62–81%** by meta threshold |
-| Era holdout 2003–2015 (never touched, pre-registered) | **56.7–57.1%**, p ≤ 2×10⁻⁵ on 3k–14k trades |
-| OTC instruments | **47.1%** — below coin flip; trading restricted to spot only |
-| IQ's price feed vs interbank mid | ±0.05 pip (feed IS mid; binary settlment is structurally at MID) |
-| Spread friction at half-spread | Collapses to **45%** — edge is sub-pip, execution-fragile |
-| Independent deflated z (154-trial penalty, meta 0.775) | **8.2** |
-| PBO (holdout-only CSCV) | **0.00** |
-
-**What's still running:**
-
-- **Pre-registered forward test** (`FORWARD_TEST.md`, Bonferroni α = 0.0125): H2 verdict reachable ~Jul 28; full family ~Aug 6
-- **$1 demo execution track**: broker outcome vs candle label → measures IQ's real order-time behaviour, the single most important unknown
-- **Always-on on Windows**: `supervisor.py` via Task Scheduler, never sleeps, self-restarts on failure
-
-**No validated live edge yet.** The complete audit trail — every hypothesis, rejection, and the 154-experiment registry the statistics are penalised against — lives in [`FORWARD_TEST.md`](FORWARD_TEST.md) and `research_registry.jsonl`.
+[`WINDOWS_SETUP.md`](WINDOWS_SETUP.md) and the operational scripts document the earlier host setup. Paths, scheduled jobs, and host state in those records need to be checked for the machine being configured. Cloning the repository or running the offline quickstart does not start a collector, supervisor, or trading session.

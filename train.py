@@ -164,9 +164,18 @@ class ChronoCalibratedModel:
             return self
         scores, labels = [], []
         for train_idx, val_idx in chrono_calibration_splits(len(X), self.n_folds, self.gap):
-            base = _base_pipeline(self.model_kind, self.model_params)
-            base.fit(X.iloc[train_idx], y.iloc[train_idx])
-            scores.append(_prob_up(base, X.iloc[val_idx]))
+            train_labels = y.iloc[train_idx]
+            if train_labels.nunique() == 1:
+                # An early fold may contain only one class even when the
+                # full training window contains both. Use that fold's
+                # observed class, just as for a wholly single-class fit;
+                # borrowing later rows to fit a classifier would leak.
+                fold_scores = np.full(len(val_idx), float(train_labels.iloc[0]))
+            else:
+                base = _base_pipeline(self.model_kind, self.model_params)
+                base.fit(X.iloc[train_idx], train_labels)
+                fold_scores = _prob_up(base, X.iloc[val_idx])
+            scores.append(fold_scores)
             labels.append(y.iloc[val_idx].to_numpy())
 
         self.base_ = _base_pipeline(self.model_kind, self.model_params)

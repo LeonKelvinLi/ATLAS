@@ -3,8 +3,9 @@
 Every dataset must pass this schema before it can be stored or used by the
 feature pipeline: positive prices, OHLC consistency (high is the bar maximum,
 low the minimum), exact bar duration, strictly increasing non-overlapping
-timestamps. Missing bars are reported separately (collector.find_gaps) - a
-gap is data to be acknowledged, not an error.
+timestamps, and spacing in whole bars. The initial timestamp may have any
+phase. Missing bars are reported separately (collector.find_gaps) - a gap is
+data to be acknowledged, not an error.
 """
 
 import pandas as pd
@@ -14,6 +15,8 @@ from collector import find_gaps
 
 
 def candle_schema(interval: int) -> pa.DataFrameSchema:
+    if interval <= 0:
+        raise ValueError("interval must be positive")
     return pa.DataFrameSchema(
         columns={
             "from_ts": pa.Column(int, pa.Check.ge(0)),
@@ -42,6 +45,14 @@ def candle_schema(interval: int) -> pa.DataFrameSchema:
                 and df["from_ts"].is_unique,
                 error="timestamps must be strictly increasing and unique",
             ),
+            pa.Check(
+                lambda df: df["from_ts"].diff().dropna().ge(interval).all(),
+                error="consecutive bars must not overlap",
+            ),
+            pa.Check(
+                lambda df: df["from_ts"].diff().dropna().mod(interval).eq(0).all(),
+                error=f"bar spacing must be whole multiples of {interval}s",
+            ),
         ],
         strict=True,
         ordered=True,
@@ -49,7 +60,7 @@ def candle_schema(interval: int) -> pa.DataFrameSchema:
 
 
 def validate_candles(df: pd.DataFrame, interval: int) -> pd.DataFrame:
-    """Validate a candle frame; raises pandera.errors.SchemaError on failure."""
+    """Raise SchemaError for invalid candles or ValueError for interval <= 0."""
     return candle_schema(interval).validate(df, lazy=False)
 
 

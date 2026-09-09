@@ -10,14 +10,12 @@ has had this protection for a while; the supervisor had none.
 
 import supervisor
 
-PORT = 47391  # test-only, away from 47201 (runner) and 47202 (supervisor)
-
-
 def test_second_acquire_is_refused():
-    first = supervisor.acquire_singleton_lock(PORT)
+    first = supervisor.acquire_singleton_lock(0)  # OS-assigned test port
     assert first is not None
     try:
-        assert supervisor.acquire_singleton_lock(PORT) is None
+        port = first.getsockname()[1]
+        assert supervisor.acquire_singleton_lock(port) is None
     finally:
         first.close()
 
@@ -25,10 +23,11 @@ def test_second_acquire_is_refused():
 def test_lock_is_released_when_the_holder_closes():
     """The OS reclaims the port on exit or crash, so there is no stale
     lockfile to clean up after an ungraceful death."""
-    first = supervisor.acquire_singleton_lock(PORT + 1)
+    first = supervisor.acquire_singleton_lock(0)
     assert first is not None
+    port = first.getsockname()[1]
     first.close()
-    second = supervisor.acquire_singleton_lock(PORT + 1)
+    second = supervisor.acquire_singleton_lock(port)
     assert second is not None
     second.close()
 
@@ -57,16 +56,27 @@ def test_main_exits_when_the_lock_is_held(monkeypatch, tmp_path):
     have been indistinguishable from this noise and waved off.
     """
     monkeypatch.setattr(supervisor, "LOG", tmp_path)
-    held = supervisor.acquire_singleton_lock(supervisor.SUPERVISOR_LOCK_PORT)
-    # Either way the refusal branch is what runs: if we took the lock, main()
-    # cannot have it; if we could not, a real supervisor holds it and main()
-    # cannot have it either.
+    acquire = supervisor.acquire_singleton_lock
+    held = acquire(0)
+    assert held is not None
+    port = held.getsockname()[1]
+    monkeypatch.setattr(supervisor, "SUPERVISOR_LOCK_PORT", port)
+    # The function's default argument was bound to the production constant
+    # when it was defined. Redirect the call as well as the runtime constant.
+    monkeypatch.setattr(supervisor, "acquire_singleton_lock", lambda: acquire(port))
+    monkeypatch.setattr(supervisor, "_LOCK_SOCK", None)
     try:
         monkeypatch.setattr("sys.argv", ["supervisor.py", "--paper"])
         started = []
-        monkeypatch.setattr(supervisor.subprocess, "Popen",
-                            lambda *a, **k: started.append(a) or (_ for _ in ()).throw(
-                                AssertionError("second supervisor spawned a runner")))
+
+        def reject_background_work(*args, **kwargs):
+            started.append(args)
+            raise AssertionError("second supervisor started background work")
+
+        # Protect both launch paths even if the early-return guard regresses:
+        # collection otherwise starts on a thread before the runner spawns.
+        monkeypatch.setattr(supervisor.threading, "Thread", reject_background_work)
+        monkeypatch.setattr(supervisor.subprocess, "Popen", reject_background_work)
         supervisor.main()          # must return promptly without spawning
         assert started == []
         # The refusal must be RECORDED - previously unasserted - and the
@@ -74,5 +84,4 @@ def test_main_exits_when_the_lock_is_held(monkeypatch, tmp_path):
         written = (tmp_path / "supervisor.log").read_text(encoding="utf-8")
         assert "already holds the lock" in written
     finally:
-        if held is not None:
-            held.close()
+        held.close()

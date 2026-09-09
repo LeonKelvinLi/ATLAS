@@ -83,6 +83,8 @@ def store_dataset(
     interval: int,
     candles: list[dict],
     gaps: list[dict],
+    *,
+    source: str = SOURCE,
 ) -> int:
     """Transactionally insert an immutable dataset with its content hash."""
     conn.execute("BEGIN TRANSACTION")
@@ -95,7 +97,7 @@ def store_dataset(
                 asset,
                 interval,
                 datetime.now(timezone.utc),
-                SOURCE,
+                source,
                 candles[0]["from_ts"] if candles else None,
                 candles[-1]["to_ts"] if candles else None,
                 len(candles),
