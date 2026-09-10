@@ -12,12 +12,14 @@ model constraint rather than a reserved or funded Coinbase account.
 The Coinbase Advanced interface was enabled in Leon's signed-in Chrome session.
 At about 22:16 UTC on September 10, the Fee tier details panel displayed **Intro
 1: 0.600% maker and 1.200% taker**, with a notice that the tier updates roughly
-every five minutes. Those rates are dated UI observations, not a fee quote for
-any future order. The authenticated fee endpoint has not yet been read.
+every five minutes. An authenticated SPOT/CBE fee read at **22:54:09 UTC**
+confirmed the same maker rate `0.006` and taker rate `0.012`. These are dated
+fee-tier observations, not a fee quote for any future order.
 
 The external configuration at
 `/Users/leon/.config/atlas/coinbase/preview-config.json` uses `60` maker basis
-points and `120` taker basis points from that observation, with a $100 simulated
+points and `120` taker basis points, now matched to the authenticated fee report,
+with a $100 simulated
 allocation and $100 all-in scenario budget. A maker preview and a taker preview
 are alternatives drawing on the same modeled capital. They do not allocate $100
 each. The repository example deliberately leaves the fee inputs null; it cannot
@@ -34,15 +36,27 @@ uv run --locked python scripts/coinbase_preview.py \
 The output must be a new external file; existing reports are never overwritten.
 The command makes two public GETs and exports a cost comparison. It cannot place
 orders, access a Coinbase account or transfer funds. Every future use needs
-appropriate fee inputs; the saved UI rates do not update automatically.
+appropriate fee inputs; the saved rates do not update automatically.
 
-The signed-in API key page showed no existing API keys. A form named
-`ATLASViewOnly` is prepared for the Primary portfolio, with ECDSA selected,
-View enabled, and Trade, Transfer and Receive off. Key creation is pending
-explicit approval. No private key has been created or saved. The selected
-BTC-USD panel displayed $0 USD and about 0.09 available USDC; that panel is not
-a complete inventory of the user's holdings and does not establish a $100
-funded allocation. No Coinbase purchase, sale or transfer was made.
+Leon approved creation and supplied the resulting key. `ATLASViewOnly` is now
+saved outside Git at `/Users/leon/.config/atlas/coinbase/read-only-key.json`,
+with owner-only `0600` access inside a `0700` directory. The Chrome key table
+confirms the Primary portfolio, View permission and ECDSA algorithm. The API
+independently confirms `can_view=true`, `can_trade=false`, and
+`can_transfer=false`. No secret values are included in repository evidence.
+
+The authenticated preflight completely read eight native-currency accounts at
+22:54:09 UTC. Available USD was effectively zero and available USDC was
+0.09708, with no holds reported for those two accounts. Other holdings are not
+treated as USD cash or a new allocation. This does not establish a $100 funded
+allocation. No Coinbase purchase, sale or transfer was made.
+
+Private connection evidence lives alongside the key: `permissions.json`,
+`account-selection.json`, `account-preflight.json`, and
+`preview-fee-source.json`. The portfolio selection binds the user-approved
+Primary key shown in Chrome to that key's authenticated portfolio scope before
+the account reads. Raw portfolio UUIDs stay in the private selection/discovery
+files; the normal account report uses hashed identifiers.
 
 ### Verified public preview
 
@@ -186,15 +200,15 @@ summary. A read-only connection should have no order, preview-POST, transfer or
 portfolio-mutation method. This preflight must not supply invented zero fees or
 daily P&L to the general ATLAS execution service.
 
-After approved key creation, store the exported JSON outside Git with mode
-`0600`. The accepted format contains exactly `name` and `privateKey`, using a
-P-256 private key. The optional discovery command reads key scope only:
+The approved key is saved outside Git with mode `0600`. The accepted format
+contains exactly `name` and `privateKey`, using a P-256 private key. A future
+discovery command reads key scope only and must use a new report destination:
 
 ```text
 uv run --locked python scripts/coinbase_preflight.py \
   --key-file /Users/leon/.config/atlas/coinbase/read-only-key.json \
   --permissions-only \
-  --output /Users/leon/.config/atlas/coinbase/permissions.json
+  --output /Users/leon/.config/atlas/coinbase/permissions-new.json
 ```
 
 Its private output includes the portfolio UUID and fingerprint. Discovery does
@@ -205,9 +219,13 @@ command requires `--expected-portfolio` with that verified UUID instead of
 must match the selected portfolio. Numeric HTTP failure codes are retained;
 raw provider messages, keys and JWTs are never printed.
 
-No authenticated command above has been run against Leon's account. Production
-credentials are still absent while key-creation approval is pending. Offline
-tests use temporary generated test keys and injected responses only.
+Both discovery and the portfolio-bound preflight have now succeeded against
+Leon's account. The authenticated fee rates were also checked against the
+preview configuration; `connected-fee-preview.json` records a second successful
+public preview at 22:55:16 UTC. The public preview itself still makes no account
+reads; its account-unverified fields apply to that report alone. The separate
+account preflight establishes the verified read-only connection. Offline tests
+use temporary generated test keys and injected responses only.
 
 ## Sandbox and MCP choice
 
@@ -255,7 +273,9 @@ pagination, HTTP failures and secret-safe reports. All eight frozen research
 artifacts retained their prior hashes.
 
 The live public GET preview is separate evidence from those offline tests.
-Authenticated Coinbase account connectivity remains untested pending approval
-and creation of the view-only key. No workers, scheduled jobs, live orders or
+Authenticated Coinbase account connectivity is now verified through the
+view-only key and the selected portfolio. No code changes were needed for the
+production account response. No workers, scheduled jobs, live orders or
 transfers were started. The Alpaca pilot remains halted; its support request
-was sent separately and Coinbase setup does not change that result.
+was sent separately and had no reply at the latest check. Coinbase setup does
+not change that result.
