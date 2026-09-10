@@ -35,6 +35,12 @@ configuration requires `broker: "paper"`, a `paper` object containing
 `account_id`, `cash`, and `fee_bps`, plus an external `quotes_file`. Generated
 money is not seeded into a default research account.
 
+The optional `initial_capital_limit` binds the simulator's original funding
+commitment across restarts and refuses adoption of an older uncapped account.
+See the [$100 pilot guide](paper-100-pilot.md) and
+[configuration](paper-100-config.example.json) for a dedicated synthetic test.
+This setting does not allocate or constrain money in a real brokerage account.
+
 An optional external `datasets_file` maps symbols to objects with
 `asset_class`, `bars`, `source`, and `evidence_kind`. Each bar uses a close
 `timestamp` and numeric `close`; an observed `open` is additionally required

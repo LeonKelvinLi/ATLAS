@@ -1,0 +1,30 @@
+{
+  "mode": "paper",
+  "broker": "paper",
+  "state_dir": "/var/lib/atlas-paper-100",
+  "datasets_file": "/etc/atlas-paper-100/datasets.json",
+  "quotes_file": "/etc/atlas-paper-100/quotes.json",
+  "paper": {
+    "account_id": "atlas-dedicated-paper-100",
+    "cash": "100",
+    "initial_capital_limit": "100",
+    "fee_bps": "60"
+  },
+  "risk": {
+    "allowed_symbols": ["BTC-USD"],
+    "max_order_notional": "10",
+    "max_position_notional": "25",
+    "max_concentration": "0.25",
+    "max_daily_loss": "5",
+    "max_daily_trades": 4,
+    "max_quote_age_seconds": 30,
+    "max_account_age_seconds": 30,
+    "max_slippage_bps": "25",
+    "max_spread_bps": "100"
+  },
+  "http": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "execution_tools": false
+  }
+}

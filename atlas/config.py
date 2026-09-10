@@ -134,15 +134,18 @@ def load_config(path, *, environ=None) -> PlatformConfig:
     if not isinstance(raw_risk, dict) or set(raw_risk) - {f.name for f in fields(RiskPolicy)} or set(raw_risk) & protected:
         raise ConfigError("invalid or protected risk configuration fields")
     paper = data.get("paper", {})
-    if not isinstance(paper, dict) or set(paper) - {"account_id", "cash", "fee_bps"}:
+    if not isinstance(paper, dict) or set(paper) - {"account_id", "cash", "fee_bps", "initial_capital_limit"}:
         raise ConfigError("invalid paper simulator configuration")
     expected = paper.get("account_id") if broker == "paper" else None
     if broker == "paper":
-        if set(paper) != {"account_id", "cash", "fee_bps"} or not isinstance(expected, str) or not expected:
+        if not {"account_id", "cash", "fee_bps"} <= set(paper) or not isinstance(expected, str) or not expected:
             raise ConfigError("paper account, synthetic cash, and fee assumption must be explicit")
         try:
-            decimal(paper["cash"], nonnegative=True)
+            cash = decimal(paper["cash"], nonnegative=True)
             decimal(paper["fee_bps"], nonnegative=True)
+            if "initial_capital_limit" in paper:
+                if cash > decimal(paper["initial_capital_limit"], positive=True):
+                    raise ValueError("initial synthetic capital exceeds limit")
         except ValueError:
             raise ConfigError("invalid paper financial configuration") from None
     live = _flag(env, "ATLAS_LIVE_TRADING_ENABLED")
@@ -272,6 +275,7 @@ def build_service(config: PlatformConfig, *, clock=time.time):
     try:
         broker = (PaperBroker(quotes, cash=decimal(config.paper["cash"]),
                               account_id=config.paper["account_id"], fee_bps=decimal(config.paper["fee_bps"]),
+                              initial_capital_limit=config.paper.get("initial_capital_limit"),
                               path=config.state_dir / "paper" / "simulator.db", clock=clock)
                   if config.broker == "paper" else UnavailableBroker())
         service = AtlasService(broker, ledger, config.policy, datasets=datasets,

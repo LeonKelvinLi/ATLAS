@@ -40,11 +40,17 @@ class PaperBroker:
         server_idempotency=True, limitations=("synthetic fills; no queue priority, impact or future-fill model",))
 
     def __init__(self, quotes: dict[str, Quote], *, cash=Decimal("10000"),
-                 account_id="paper-demo", path=":memory:", fee_bps=Decimal("0"), clock=time.time):
+                 account_id="paper-demo", path=":memory:", fee_bps=Decimal("0"),
+                 initial_capital_limit=None, clock=time.time):
         self.quotes = dict(quotes)
         self.clock = clock
         self.fee_bps = decimal(fee_bps, nonnegative=True)
         initial_cash = decimal(cash, nonnegative=True)
+        self.initial_cash = initial_cash
+        self.initial_capital_limit = (decimal(initial_capital_limit, positive=True)
+                                      if initial_capital_limit is not None else None)
+        if self.initial_capital_limit is not None and initial_cash > self.initial_capital_limit:
+            raise BrokerError("paper_initial_capital_limit_exceeded")
         self.account_id = _identifier(account_id)
         self._lock = threading.RLock()
         self._failed = False
@@ -83,10 +89,16 @@ class PaperBroker:
             if created_new:
                 for statement in _SCHEMA:
                     self.db.execute(statement)
-                self.db.execute("PRAGMA user_version=2")
+                # A bound account uses a new version so an older binary cannot
+                # reopen it while silently ignoring the capital commitment.
+                self.db.execute("PRAGMA user_version=" + ("3" if self.initial_capital_limit is not None else "2"))
                 self.db.execute("INSERT INTO metadata VALUES ('fee_bps',?)", (str(self.fee_bps),))
                 self.db.execute("INSERT INTO metadata VALUES ('execution_model','instant_limit_v1')")
                 self.db.execute("INSERT INTO metadata VALUES ('last_event_time',?)", (str(self._clock_time()),))
+                if self.initial_capital_limit is not None:
+                    self.db.execute("INSERT INTO metadata VALUES ('initial_cash',?)", (str(initial_cash),))
+                    self.db.execute("INSERT INTO metadata VALUES ('initial_capital_limit',?)",
+                                    (str(self.initial_capital_limit),))
                 self.db.execute("INSERT INTO account VALUES (?, ?)",
                                 (account_id, str(initial_cash)))
             self._validate_state()
@@ -133,9 +145,32 @@ class PaperBroker:
         if (metadata.get("execution_model") != "instant_limit_v1"
                 or decimal(metadata.get("fee_bps"), nonnegative=True) != self.fee_bps):
             raise BrokerError("paper_execution_assumptions_changed")
+        self._check_initial_capital(metadata)
         recorded = metadata.get("last_event_time", "")
         if not recorded.isdigit() or self._clock_time() < int(recorded):
             raise BrokerError("paper_clock_rewind_requires_recovery")
+
+    def _check_initial_capital(self, metadata):
+        """Pin initial synthetic funding, not current cash, equity or losses.
+
+        There is no deposit/reset operation. A bound account must retain its
+        original commitment on every reopen; legacy state cannot establish it
+        from today's balance, which may already include gains or losses.
+        """
+        stored_limit = metadata.get("initial_capital_limit")
+        if self.initial_capital_limit is None:
+            if stored_limit is not None or "initial_cash" in metadata:
+                raise BrokerError("paper_initial_capital_binding_cannot_be_removed")
+            return
+        if stored_limit is None or "initial_cash" not in metadata:
+            raise BrokerError("paper_initial_capital_history_unverified")
+        try:
+            limit = decimal(stored_limit, positive=True)
+            initial = decimal(metadata["initial_cash"], nonnegative=True)
+        except ValueError as exc:
+            raise BrokerError("paper_initial_capital_binding_invalid") from exc
+        if limit != self.initial_capital_limit or initial != self.initial_cash or initial > limit:
+            raise BrokerError("paper_initial_capital_binding_changed")
 
     @contextmanager
     def _read_snapshot(self):
@@ -177,9 +212,12 @@ class PaperBroker:
         expected = {" ".join(sql.split()).lower() for sql in _SCHEMA}
         actual = {" ".join(row[0].split()).lower() for row in self.db.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-        if actual != expected or self.db.execute("PRAGMA user_version").fetchone()[0] != 2:
+        version = 3 if self.initial_capital_limit is not None else 2
+        if actual != expected:
             raise BrokerError("paper_schema_mismatch_recovery_required")
         self._check_clock_and_model()
+        if self.db.execute("PRAGMA user_version").fetchone()[0] != version:
+            raise BrokerError("paper_schema_mismatch_recovery_required")
         accounts = self.db.execute("SELECT * FROM account").fetchall()
         if len(accounts) != 1 or accounts[0]["id"] != self.account_id:
             raise BrokerError("paper_account_identity_mismatch")
