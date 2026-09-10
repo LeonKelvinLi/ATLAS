@@ -2,6 +2,23 @@
 
 Connection observed September 9, 2026 local time / September 10 UTC.
 
+## Current browser handoff
+
+The owner subsequently authorized Google sign-in, completing the setup and
+accepting the paper-account terms. Chrome reached the official
+`https://app.alpaca.markets/signup` form. The current login and signup screens
+offer email/password authentication; no Google sign-in option was shown.
+Registration requires first/last name, country of tax residence, email, a new
+password and a referral-source selection. No personal fields were filled and
+the registration was not submitted. The non-binding cookie notice was accepted.
+The signup tab is retained for owner entry and verification.
+
+An empty private directory was prepared at
+`/Users/leon/.config/atlas/alpaca-paper` with mode `0700`; no existing files or
+permissions were changed and no credentials were read or written. The planned
+key file is `paper-keys.json` and the planned read-only result is
+`preflight-account.json` in that directory. Neither file has been created.
+
 ## What is connected
 
 The owner confirmed installation of `alpaca@openai-curated-remote`. The installed
