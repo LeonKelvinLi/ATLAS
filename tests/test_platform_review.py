@@ -156,8 +156,7 @@ def test_financial_input_precision_and_magnitude_bounds_are_explicit(value):
 
 
 def test_performance_distinguishes_opening_fees_closed_sell_fees_and_unavailable_metrics(make_service):
-    h = make_service(paper=True)
-    h.broker.fee_bps = D("100")
+    h = make_service(paper=True, paper_fee_bps="100")
     buy = prepare(h)
     execute(h, buy)
     h.broker.quotes[SYMBOL] = replace(h.broker.quotes[SYMBOL], bid=D("105"), ask=D("105.01"))

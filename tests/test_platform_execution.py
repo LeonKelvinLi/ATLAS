@@ -146,7 +146,7 @@ def make_service(tmp_path):
     ledgers, paper_brokers = [], []
     sequence = 0
 
-    def make(*, mode="paper", paper=False, policy_changes=None, live_evidence=True):
+    def make(*, mode="paper", paper=False, paper_fee_bps="0", policy_changes=None, live_evidence=True):
         nonlocal sequence
         sequence += 1
         clock = Clock()
@@ -154,7 +154,7 @@ def make_service(tmp_path):
         broker = FakeBroker(clock, live=mode.startswith("live-"))
         if paper:
             broker = PaperBroker({SYMBOL: broker.quote}, cash=D("10000"), account_id=ACCOUNT,
-                                 path=tmp_path / f"paper-{sequence}.db", clock=clock)
+                                 path=tmp_path / f"paper-{sequence}.db", clock=clock, fee_bps=D(paper_fee_bps))
             paper_brokers.append(broker)
         policy = RiskPolicy(mode=mode, expected_account_id=ACCOUNT,
                             live_enabled=mode.startswith("live-"), auto_enabled=mode == "live-auto",

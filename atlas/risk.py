@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_DOWN
 import hashlib
 import json
+from types import MappingProxyType
 
 from atlas.domain import AccountSnapshot, Quote, decimal, financial_context, json_value
 
@@ -215,3 +216,209 @@ def position_size(policy: RiskPolicy, account: AccountSnapshot, quote: Quote) ->
                 "requires_full_risk_check": True, "basis": "policy ceilings, not optimized allocation"}
     except (ValueError, TypeError, ArithmeticError):
         return {"available": False, "reason": "insufficient verified portfolio or quote data"}
+
+
+@dataclass(frozen=True)
+class PortfolioRiskPolicy:
+    """Optional trusted portfolio gates, independent of baseline order policy.
+
+    Exposures use account-currency notionals, leverage/weights are fractions,
+    turnover is a multiple of a declared fixed equity basis, and volatility
+    requires an order-bound projection from a separately vetted provider.
+    """
+    max_drawdown: Decimal | None = None
+    max_gross_leverage: Decimal | None = None
+    max_net_leverage: Decimal | None = None
+    max_asset_class_weights: dict = field(default_factory=dict)
+    max_correlated_weight: Decimal | None = None
+    max_positions: int | None = None
+    max_turnover: Decimal | None = None
+    max_portfolio_volatility: Decimal | None = None
+    max_snapshot_age_seconds: int = 30
+    require_health: bool = True
+    allowed_strategy_health: frozenset[str] = frozenset({"HEALTHY", "WATCH"})
+    volatility_basis: str = "annualized_daily_returns"
+
+    def __post_init__(self):
+        for name in ("max_drawdown", "max_gross_leverage", "max_net_leverage", "max_correlated_weight",
+                     "max_turnover", "max_portfolio_volatility"):
+            if getattr(self, name) is not None:
+                object.__setattr__(self, name, decimal(getattr(self, name), positive=True))
+        for name in ("max_drawdown", "max_correlated_weight"):
+            if getattr(self, name) is not None and getattr(self, name) > 1:
+                raise ValueError("portfolio fractions cannot exceed one")
+        weights = {}
+        if not isinstance(self.max_asset_class_weights, (dict, MappingProxyType)):
+            raise ValueError("asset-class weights require a mapping")
+        for name, value in self.max_asset_class_weights.items():
+            if name not in {"equity", "crypto"}:
+                raise ValueError("unknown long-only asset class")
+            weights[name] = decimal(value, positive=True)
+            if weights[name] > 1:
+                raise ValueError("asset-class weights cannot exceed one")
+        object.__setattr__(self, "max_asset_class_weights", MappingProxyType(weights))
+        for name in ("max_positions", "max_snapshot_age_seconds"):
+            value = getattr(self, name)
+            if name == "max_snapshot_age_seconds" and value is None:
+                raise ValueError("snapshot age limit is required")
+            if value is not None and (type(value) is not int or value < 1):
+                raise ValueError("portfolio count/age limits must be positive integers")
+        if type(self.require_health) is not bool:
+            raise ValueError("require_health must be boolean")
+        if isinstance(self.allowed_strategy_health, str):
+            raise ValueError("allowed strategy health requires a collection")
+        states = frozenset(self.allowed_strategy_health)
+        if not states or not states <= {"HEALTHY", "WATCH"}:
+            raise ValueError("degraded/disabled strategy health cannot authorize new risk")
+        object.__setattr__(self, "allowed_strategy_health", states)
+        if not isinstance(self.volatility_basis, str) or not self.volatility_basis.strip():
+            raise ValueError("volatility basis must be explicit")
+
+    def public(self):
+        return {name: ({key: str(value) for key, value in item.items()} if name == "max_asset_class_weights"
+                       else sorted(item) if isinstance(item, frozenset) else json_value(item))
+                for name, item in self.__dict__.items()}
+
+    def fingerprint(self):
+        return hashlib.sha256(json.dumps(self.public(), sort_keys=True).encode()).hexdigest()
+
+
+def portfolio_order_fingerprint(symbol, asset_class, side, quantity, limit_price, estimated_fees):
+    terms = {"symbol": symbol, "asset_class": asset_class, "side": side,
+             "quantity": str(decimal(quantity, positive=True)), "limit_price": str(decimal(limit_price, positive=True)),
+             "estimated_fees": str(decimal(estimated_fees, nonnegative=True))}
+    return hashlib.sha256(json.dumps(terms, sort_keys=True).encode()).hexdigest()
+
+
+@financial_context
+def evaluate_portfolio_risk(policy: PortfolioRiskPolicy, snapshot, *, now, expected_account_fingerprint,
+                            symbol, asset_class, strategy_id, side, quantity, limit_price, estimated_fees=None):
+    """Evaluate fresh trusted data; missing configured inputs fail closed.
+
+    This function cannot fetch or authenticate a provider. MCP input must
+    never be passed as the snapshot. A strictly inventory-backed reduction
+    may reduce an already breached entry limit, but does not waive identity,
+    freshness, finite data or complete projection checks.
+    """
+    checks, projections = [], {}
+
+    def check(code, passed, detail):
+        checks.append({"code": code, "passed": bool(passed), "detail": detail})
+
+    def result(reducing=False):
+        return {"passed": all(row["passed"] for row in checks), "checks": checks,
+                "risk_reducing": reducing, "projections": json_value(projections),
+                "policy_hash": policy.fingerprint(), "basis": "trusted fresh long-only portfolio snapshot"}
+
+    if not isinstance(snapshot, dict):
+        check("portfolio_snapshot", False, "trusted portfolio snapshot is unavailable")
+        return result()
+    timestamp = snapshot.get("observed_at")
+    check("portfolio_identity", isinstance(expected_account_fingerprint, str) and bool(expected_account_fingerprint)
+          and snapshot.get("account_fingerprint") == expected_account_fingerprint, "exact account binding")
+    check("portfolio_freshness", type(now) is int and now >= 0 and type(timestamp) is int
+          and 0 <= now - timestamp <= policy.max_snapshot_age_seconds, "fresh portfolio source timestamp")
+    check("portfolio_order_contract", side in {"buy", "sell"} and asset_class in {"equity", "crypto"}
+          and isinstance(symbol, str) and bool(symbol) and isinstance(strategy_id, str) and bool(strategy_id),
+          "bounded long-only instrument and strategy identity")
+    try:
+        equity = decimal(snapshot.get("equity"), positive=True)
+        mark = decimal(snapshot.get("order_mark_price"), positive=True)
+        qty, price = decimal(quantity, positive=True), decimal(limit_price, positive=True)
+        fees = decimal(estimated_fees, nonnegative=True)
+        raw_positions = snapshot.get("positions")
+        if not isinstance(raw_positions, (list, tuple)):
+            raise ValueError("complete positions required")
+        inventory, symbol_value, classes, quantities = Decimal("0"), Decimal("0"), {}, {}
+        for position in raw_positions:
+            name, kind = position["symbol"], position["asset_class"]
+            if not isinstance(name, str) or not name or kind not in {"equity", "crypto"}:
+                raise ValueError("invalid position identity")
+            held, value = decimal(position["quantity"], nonnegative=True), decimal(position["market_value"], nonnegative=True)
+            if (held == 0) != (value == 0):
+                raise ValueError("position quantity/value disagree")
+            classes[kind] = classes.get(kind, Decimal("0")) + value
+            quantities[name] = quantities.get(name, Decimal("0")) + held
+            if name == symbol:
+                if kind != asset_class:
+                    raise ValueError("symbol asset class mismatch")
+                inventory += held
+                symbol_value += value
+        gross = sum(classes.values(), Decimal("0"))
+        removed = symbol_value * qty / inventory if side == "sell" and inventory else Decimal("0")
+        reducing = side == "sell" and 0 < qty <= inventory and removed > 0
+        check("portfolio_inventory", side != "sell" or reducing, "sell must strictly reduce verified long inventory")
+        added = qty * mark if side == "buy" else -removed
+        # Positive limit-price gains never create extra risk budget.
+        execution_loss = max(Decimal("0"), qty * price - added) if side == "buy" else max(Decimal("0"), removed - qty * price)
+        post_equity = equity - fees - execution_loss
+        post_gross = gross + added
+        if post_equity <= 0 or post_gross < 0:
+            raise ValueError("invalid projected portfolio")
+        post_classes = dict(classes)
+        post_classes[asset_class] = post_classes.get(asset_class, Decimal("0")) + added
+        post_quantities = dict(quantities)
+        post_quantities[symbol] = post_quantities.get(symbol, Decimal("0")) + (qty if side == "buy" else -qty)
+        projections.update(equity=post_equity, gross_exposure=post_gross, net_exposure=post_gross,
+                           gross_leverage=post_gross / post_equity, net_leverage=post_gross / post_equity,
+                           position_count=sum(value > 0 for value in post_quantities.values()),
+                           asset_class_weights={key: value / post_equity for key, value in post_classes.items()})
+        for key in ("gross_exposure", "net_exposure"):
+            if key in snapshot:
+                check("portfolio_" + key + "_consistent", decimal(snapshot[key], nonnegative=True) == gross,
+                      "long-only position totals must agree with supplied aggregates")
+        for key in ("global_enabled", "broker_enabled", "account_enabled", "data_quality_passed"):
+            value = snapshot.get(key)
+            check("portfolio_" + key, value is True,
+                  "explicit authority and valid data are required for every order, including exits")
+        if policy.require_health:
+            health = snapshot.get("strategy_health", {}).get(strategy_id) if isinstance(snapshot.get("strategy_health"), dict) else None
+            check("portfolio_strategy_health", health in {"HEALTHY", "WATCH", "DEGRADED", "DISABLED"}
+                  and (health in policy.allowed_strategy_health or reducing), "known strategy health; no automatic reactivation")
+            enabled = snapshot.get("symbol_enabled", {}).get(symbol) if isinstance(snapshot.get("symbol_enabled"), dict) else None
+            check("portfolio_symbol_enabled", enabled is True, "explicit symbol permission is required")
+        for name, measure in (("max_gross_leverage", post_gross / post_equity), ("max_net_leverage", post_gross / post_equity)):
+            cap = getattr(policy, name)
+            if cap is not None:
+                check("portfolio_" + name, measure <= cap or reducing, "post-trade limit; an existing breach can be reduced")
+        for name, cap in policy.max_asset_class_weights.items():
+            check("portfolio_asset_class_" + name, post_classes.get(name, Decimal("0")) / post_equity <= cap or reducing,
+                  "complete position classification; bounded reductions may exit an existing breach")
+        if policy.max_positions is not None:
+            check("portfolio_position_count", projections["position_count"] <= policy.max_positions or reducing, "maximum distinct held symbols")
+        if policy.max_correlated_weight is not None:
+            buckets = snapshot.get("correlated_exposure_by_symbol")
+            if not isinstance(buckets, dict) or symbol not in buckets:
+                raise ValueError("correlated group exposure unavailable")
+            correlated = decimal(buckets[symbol], nonnegative=True)
+            if not symbol_value <= correlated <= gross:
+                raise ValueError("correlated group exposure inconsistent")
+            post_correlated = correlated + added
+            projections["correlated_weight"] = post_correlated / post_equity
+            check("portfolio_correlated_exposure", post_correlated / post_equity <= policy.max_correlated_weight or reducing,
+                  "trusted predefined group; no caller-inferred correlation")
+        if policy.max_drawdown is not None:
+            drawdown = decimal(snapshot.get("drawdown"), nonnegative=True)
+            if drawdown > 1:
+                raise ValueError("drawdown invalid")
+            projected_dd = 1 - post_equity / equity * (1 - drawdown)
+            projections["drawdown"] = projected_dd
+            check("portfolio_drawdown", projected_dd < policy.max_drawdown or reducing, "known peak-based drawdown; exits remain possible")
+        if policy.max_turnover is not None:
+            turnover = decimal(snapshot.get("turnover"), nonnegative=True)
+            denominator = decimal(snapshot.get("turnover_equity_basis"), positive=True)
+            projected_turnover = turnover + qty * price / denominator
+            projections["turnover"] = projected_turnover
+            check("portfolio_turnover", projected_turnover <= policy.max_turnover or reducing, "gross notional over a trusted fixed equity basis")
+        if policy.max_portfolio_volatility is not None:
+            volatility = decimal(snapshot.get("projected_portfolio_volatility"), nonnegative=True)
+            check("portfolio_volatility_identity", snapshot.get("volatility_basis") == policy.volatility_basis
+                  and snapshot.get("order_fingerprint") == portfolio_order_fingerprint(symbol, asset_class, side, qty, price, fees),
+                  "vetted volatility projection must bind this exact order and declared return horizon")
+            projections["portfolio_volatility"] = volatility
+            check("portfolio_volatility", volatility <= policy.max_portfolio_volatility or reducing,
+                  "no volatility or covariance estimate is invented by this gate")
+    except (ValueError, TypeError, KeyError, ArithmeticError):
+        check("portfolio_complete_finite_data", False, "missing or inconsistent portfolio inputs block configured limits")
+        return result()
+    return result(reducing)

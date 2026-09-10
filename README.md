@@ -110,6 +110,14 @@ Robinhood publicly documents an official Agentic MCP service for equities, optio
 
 ## What the research establishes
 
+The offline [research gauntlet](docs/research-workflow.md) now connects canonical
+publication-aware data, causal feature lineage, immutable attempts, event replay,
+cost and parameter attacks, simple baselines, dependent resampling, and conservative
+scorecards. Run `uv run --locked python -m atlas research demo` for a temporary,
+explicitly synthetic example with an exact reproduction check. It starts no service.
+Use the [forensic audit](docs/research-forensic-audit.md) and
+[data inventory](docs/data-inventory.md) to understand the limits of historical evidence.
+
 The repository contains three historical FX-binary model snapshots and research ledgers, but lacks the full market database and operational logs needed to reproduce the recorded edge. Historical candidate win rates include rejected orders; the recorded practice sample is small and clustered. There is no verified funded-live result here. **ATLAS has not demonstrated that its current model beats simple baselines after realistic costs.**
 
 The [quantitative audit](docs/quantitative-audit.md) traces leakage, selection, contract and sample-size limitations. This batch adds opt-in causal features `2.0.0`, builds cross-asset context before future-label filtering, strengthens chronological validation, and compares fixed momentum/mean-reversion rules with buy-and-hold and a seeded random control using explicit costs. Only synthetic fixtures were evaluated; no market-data winner was selected.
@@ -125,6 +133,7 @@ The original feature version `1.3.0`, frozen models, research ledgers and [one-t
 | AI interface and configuration | `atlas/mcp_server.py`, `atlas/config.py`, `atlas/__main__.py` |
 | Broker boundaries | `atlas/brokers/` |
 | Research and analytics | `atlas/strategies.py`, `atlas/analytics.py`, `atlas/evidence.py`, `atlas/research_features.py`, `atlas/validation.py` |
+| Reproducible research | `atlas/research/market.py`, `point_in_time.py`, `splits.py`, `store.py`, `replay.py`, `diagnostics.py`, `health.py`, `lab.py`, `interface.py` |
 | Existing quantitative pipeline | `storage.py`, `features.py`, `train.py`, `research_*.py`, `validation_stats.py` |
 | Operational compatibility | `supervisor.py`, `live_h2_runner.py`, `runtime_paths.py`, `settle_missing.py` |
 | Offline verification | `tests/` |

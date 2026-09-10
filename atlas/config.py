@@ -4,11 +4,12 @@ from dataclasses import dataclass, field, fields
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import time
 
 from atlas.domain import BrokerCapabilities, Quote, UnsupportedCapability, decimal
-from atlas.risk import RiskPolicy
+from atlas.risk import PortfolioRiskPolicy, RiskPolicy
 
 PROJECT = Path(__file__).resolve().parents[1]
 
@@ -36,7 +37,7 @@ def read_secret_file(value) -> bytes:
         before = original.lstat()
         if stat.S_ISLNK(before.st_mode):
             raise ConfigError("secret files must not be symlinks")
-        fd = os.open(original, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(original, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
@@ -53,7 +54,8 @@ def read_secret_file(value) -> bytes:
 
 def _json_file(path, *, max_bytes=20_000_000):
     try:
-        with external_path(path).open("rb") as stream:
+        descriptor = os.open(external_path(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as stream:
             info = os.fstat(stream.fileno())
             if (not stat.S_ISREG(info.st_mode) or info.st_uid not in {0, os.getuid()}
                     or stat.S_IMODE(info.st_mode) & 0o022):
@@ -95,9 +97,11 @@ class PlatformConfig:
     state_dir: Path
     broker: str
     policy: RiskPolicy = field(repr=False)
+    portfolio_policy: PortfolioRiskPolicy | None = field(default=None, repr=False)
     paper: dict = field(default_factory=dict, repr=False)
     datasets_file: Path | None = None
     quotes_file: Path | None = None
+    research_store: Path | None = None
     approval_key_file: Path | None = field(default=None, repr=False)
     http_bearer_file: Path | None = field(default=None, repr=False)
     host: str = "127.0.0.1"
@@ -116,7 +120,7 @@ class PlatformConfig:
 def load_config(path, *, environ=None) -> PlatformConfig:
     env = os.environ if environ is None else environ
     data = _json_file(path, max_bytes=1_000_000)
-    allowed = {"mode", "state_dir", "broker", "risk", "paper", "datasets_file", "quotes_file", "http"}
+    allowed = {"mode", "state_dir", "broker", "risk", "portfolio_risk", "paper", "datasets_file", "quotes_file", "research_store", "http"}
     if not isinstance(data, dict) or set(data) - allowed:
         raise ConfigError("unknown configuration fields")
     mode = data.get("mode", "research")
@@ -159,6 +163,21 @@ def load_config(path, *, environ=None) -> PlatformConfig:
         policy = RiskPolicy(mode=mode, expected_account_id=expected, live_enabled=live, auto_enabled=auto, **raw_risk)
     except (ValueError, TypeError):
         raise ConfigError("risk policy validation failed") from None
+    portfolio_policy = None
+    if "portfolio_risk" in data:
+        raw_portfolio = data["portfolio_risk"]
+        if not isinstance(raw_portfolio, dict) or set(raw_portfolio) - {f.name for f in fields(PortfolioRiskPolicy)}:
+            raise ConfigError("invalid portfolio risk fields; provider inputs cannot come from configuration")
+        try:
+            portfolio_policy = PortfolioRiskPolicy(**raw_portfolio)
+            if portfolio_policy.max_positions is not None and portfolio_policy.max_positions > 1000:
+                raise ValueError
+            if portfolio_policy.max_snapshot_age_seconds > 3600:
+                raise ValueError
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", portfolio_policy.volatility_basis):
+                raise ValueError
+        except (ValueError, TypeError):
+            raise ConfigError("portfolio policy validation failed") from None
     http = data.get("http", {})
     if not isinstance(http, dict) or set(http) - {"host", "port", "execution_tools"}:
         raise ConfigError("invalid HTTP configuration")
@@ -168,9 +187,14 @@ def load_config(path, *, environ=None) -> PlatformConfig:
     if execution and not (mode == "paper" or (mode.startswith("live-") and live and (mode != "live-auto" or auto))):
         raise ConfigError("execution tool registration requires explicit mode and enable flags")
     paths = {name: external_path(data[name]) if data.get(name) is not None else None
-             for name in ("datasets_file", "quotes_file")}
+             for name in ("datasets_file", "quotes_file", "research_store")}
+    if data.get("research_store") is not None:
+        original_store = Path(data["research_store"]).expanduser()
+        if original_store.is_symlink():
+            raise ConfigError("research store must not be a symlink")
+        paths["research_store"] = original_store
     return PlatformConfig(
-        mode, external_path(data.get("state_dir")), broker, policy, paper=paper, **paths,
+        mode, external_path(data.get("state_dir")), broker, policy, portfolio_policy=portfolio_policy, paper=paper, **paths,
         approval_key_file=_secret_path(env["ATLAS_APPROVAL_KEY_FILE"]) if env.get("ATLAS_APPROVAL_KEY_FILE") else None,
         http_bearer_file=_secret_path(env["ATLAS_HTTP_BEARER_FILE"]) if env.get("ATLAS_HTTP_BEARER_FILE") else None,
         host=host, port=port, execution_tools=execution,
@@ -219,6 +243,8 @@ def build_service(config: PlatformConfig, *, clock=time.time):
     for dataset in datasets.values():
         if not isinstance(dataset, dict) or dataset.get("asset_class") not in {"equity", "crypto", "fx_binary"}:
             raise ConfigError("invalid dataset contract")
+        if str(dataset.get("role", "")).lower() in {"holdout", "sealed_holdout"} or str(dataset.get("evidence_kind", "")).lower() in {"holdout", "sealed_holdout"}:
+            raise ConfigError("protected holdout data cannot be configured for ordinary research")
         if not isinstance(dataset.get("bars"), list) or len(dataset["bars"]) > 100_000:
             raise ConfigError("invalid dataset size")
         validate_bars(dataset["bars"], now=int(clock()))
@@ -248,9 +274,14 @@ def build_service(config: PlatformConfig, *, clock=time.time):
                               account_id=config.paper["account_id"], fee_bps=decimal(config.paper["fee_bps"]),
                               path=config.state_dir / "paper" / "simulator.db", clock=clock)
                   if config.broker == "paper" else UnavailableBroker())
-        return AtlasService(broker, ledger, config.policy, datasets=datasets,
+        service = AtlasService(broker, ledger, config.policy, datasets=datasets,
                             evidence=EvidenceStore(PROJECT, config.state_dir),
-                            kill_switch_path=config.state_dir / "KILL_SWITCH", clock=clock)
+                            kill_switch_path=config.state_dir / "KILL_SWITCH", clock=clock,
+                            **({"portfolio_policy": config.portfolio_policy} if config.portfolio_policy is not None else {}))
+        if config.research_store is not None:
+            from atlas.research.store import ResearchStore
+            service.research_store = ResearchStore(config.research_store, clock=clock)
+        return service
     except Exception:
         ledger.close()
         raise

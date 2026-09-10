@@ -7,6 +7,7 @@ It does not model queue priority, hidden liquidity, impact or future fills.
 from decimal import Decimal, ROUND_CEILING
 from contextlib import contextmanager
 import json
+import math
 import os
 from pathlib import Path
 import sqlite3
@@ -19,6 +20,7 @@ from atlas.domain import (AccountSnapshot, BrokerCapabilities, BrokerError, Brok
                           financial_context, financial_value, json_value)
 
 _SCHEMA = (
+    "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     "CREATE TABLE account (id TEXT PRIMARY KEY, cash TEXT NOT NULL)",
     "CREATE TABLE positions (symbol TEXT PRIMARY KEY, quantity TEXT NOT NULL, cost TEXT NOT NULL)",
     "CREATE TABLE orders (client_id TEXT PRIMARY KEY, broker_id TEXT UNIQUE NOT NULL, "
@@ -81,7 +83,10 @@ class PaperBroker:
             if created_new:
                 for statement in _SCHEMA:
                     self.db.execute(statement)
-                self.db.execute("PRAGMA user_version=1")
+                self.db.execute("PRAGMA user_version=2")
+                self.db.execute("INSERT INTO metadata VALUES ('fee_bps',?)", (str(self.fee_bps),))
+                self.db.execute("INSERT INTO metadata VALUES ('execution_model','instant_limit_v1')")
+                self.db.execute("INSERT INTO metadata VALUES ('last_event_time',?)", (str(self._clock_time()),))
                 self.db.execute("INSERT INTO account VALUES (?, ?)",
                                 (account_id, str(initial_cash)))
             self._validate_state()
@@ -115,6 +120,22 @@ class PaperBroker:
     def _ensure_ready(self):
         if self._failed or self.db is None:
             raise BrokerError("paper_state_unavailable_recovery_required")
+        self._check_clock_and_model()
+
+    def _clock_time(self):
+        value = self.clock()
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise BrokerError("paper_clock_invalid")
+        return int(value)
+
+    def _check_clock_and_model(self):
+        metadata = dict(self.db.execute("SELECT key,value FROM metadata"))
+        if (metadata.get("execution_model") != "instant_limit_v1"
+                or decimal(metadata.get("fee_bps"), nonnegative=True) != self.fee_bps):
+            raise BrokerError("paper_execution_assumptions_changed")
+        recorded = metadata.get("last_event_time", "")
+        if not recorded.isdigit() or self._clock_time() < int(recorded):
+            raise BrokerError("paper_clock_rewind_requires_recovery")
 
     @contextmanager
     def _read_snapshot(self):
@@ -125,12 +146,15 @@ class PaperBroker:
             if owns_transaction:
                 self.db.execute("BEGIN")
             try:
+                self._check_clock_and_model()
                 yield
             finally:
                 if owns_transaction and self.db.in_transaction:
                     self.db.execute("ROLLBACK")  # Read-only transaction; no durable mutation.
 
     def _commit(self):
+        self._check_clock_and_model()
+        self.db.execute("UPDATE metadata SET value=? WHERE key='last_event_time'", (str(self._clock_time()),))
         self.db.execute("COMMIT")
         if self.path is not None:
             self._sync_directory(self.path.parent)
@@ -153,8 +177,9 @@ class PaperBroker:
         expected = {" ".join(sql.split()).lower() for sql in _SCHEMA}
         actual = {" ".join(row[0].split()).lower() for row in self.db.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-        if actual != expected or self.db.execute("PRAGMA user_version").fetchone()[0] != 1:
+        if actual != expected or self.db.execute("PRAGMA user_version").fetchone()[0] != 2:
             raise BrokerError("paper_schema_mismatch_recovery_required")
+        self._check_clock_and_model()
         accounts = self.db.execute("SELECT * FROM account").fetchall()
         if len(accounts) != 1 or accounts[0]["id"] != self.account_id:
             raise BrokerError("paper_account_identity_mismatch")
@@ -238,7 +263,7 @@ class PaperBroker:
                 result, request = self._result(row["result"]), json.loads(row["request"])
                 if result.status == "accepted" and request["side"] == "buy":
                     reserved += decimal(request["quantity"]) * decimal(request["limit_price"]) * (1 + self.fee_bps / 10000)
-                if row["ts"] >= day_start and result.realized_pnl is not None:
+                if day_start <= row["ts"] <= now and result.realized_pnl is not None:
                     pnl += result.realized_pnl
             equity = cash + sum((p.market_value for p in positions), Decimal("0"))
             oldest_component = min(component_times)
@@ -263,6 +288,7 @@ class PaperBroker:
         with self._lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
+                self._check_clock_and_model()
                 existing = self.db.execute("SELECT * FROM orders WHERE client_id=?", (order.client_order_id,)).fetchone()
                 if existing:
                     if existing["request"] != encoded:
@@ -319,7 +345,7 @@ class PaperBroker:
         self._ensure_ready()
         if bool(broker_order_id) == bool(client_order_id):
             raise BrokerError("provide_one_order_identifier")
-        with self._lock:
+        with self._read_snapshot():
             column, value = ("broker_id", broker_order_id) if broker_order_id else ("client_id", client_order_id)
             row = self.db.execute(f"SELECT result FROM orders WHERE {column}=?", (value,)).fetchone()
             return self._result(row["result"]) if row else None

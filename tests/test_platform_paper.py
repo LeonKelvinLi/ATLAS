@@ -241,6 +241,46 @@ def test_existing_account_identity_mismatch_refused(tmp_path):
         broker(path=path, account_id="wrong")
 
 
+def test_restart_cannot_change_persisted_fee_assumptions(tmp_path):
+    path = tmp_path / "paper.db"
+    b = broker(path=path)
+    b.submit_order(order(quantity="1", limit="90"))
+    b.close()
+    with pytest.raises(BrokerError, match="assumptions_changed"):
+        PaperBroker({"ABC": quote()}, cash=D("1000"), fee_bps=D("0"), path=path, clock=lambda: 100)
+    restored = broker(path=path)
+    assert restored.get_account().buying_power == D("909.1")
+    restored.close()
+
+
+def test_clock_rewind_cannot_expose_future_paper_account_state(tmp_path):
+    path = tmp_path / "paper.db"
+    b = broker(path=path)
+    b.submit_order(order())
+    b.clock = lambda: 200
+    b.quotes["ABC"] = quote(bid=D("110"), ask=D("111"), timestamp=200)
+    b.submit_order(order("sell", side="sell", quantity="2", limit="110"))
+    b.clock = lambda: 100
+    with pytest.raises(BrokerError, match="clock_rewind"):
+        b.get_account()
+    b.close()
+    with pytest.raises(BrokerError, match="clock_rewind"):
+        broker(path=path)
+
+
+def test_legacy_unversioned_assumptions_require_recovery_not_silent_migration(tmp_path):
+    path = tmp_path / "paper.db"
+    b = broker(path=path)
+    b.close()
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE metadata")
+        db.execute("PRAGMA user_version=1")
+    with pytest.raises(BrokerError, match="schema_mismatch"):
+        broker(path=path)
+    with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 1
+
+
 def test_initialization_requires_directory_durability_and_leaves_failed_state_for_recovery(tmp_path, monkeypatch):
     path = tmp_path / "paper.db"
     monkeypatch.setattr(PaperBroker, "_sync_directory", staticmethod(lambda path: (_ for _ in ()).throw(OSError("injected"))))

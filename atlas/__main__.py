@@ -144,6 +144,8 @@ def issue_operator_receipt(*, journal, proposal_id, key_file, output_file, propo
 def main(argv=None):
     parser = argparse.ArgumentParser(description="ATLAS offline research and explicitly configured server interface")
     commands = parser.add_subparsers(dest="command")
+    from atlas.research.interface import add_research_parser, research_command
+    add_research_parser(commands)
     commands.add_parser("demo", help="generated-data example using in-memory paper state only")
     inspect = commands.add_parser("config-check", help="validate external configuration without creating state or starting services")
     inspect.add_argument("--config", required=True)
@@ -163,6 +165,8 @@ def main(argv=None):
     try:
         if args.command == "demo":
             result = demo()
+        elif args.command == "research":
+            result = research_command(args)
         elif args.command == "approve":
             if args.proposal_hash is None and not sys.stdin.isatty():
                 raise ConfigError("noninteractive approval requires the explicit full proposal hash")
@@ -196,6 +200,9 @@ def main(argv=None):
                 finally:
                     service.stop.set()
                     service.ledger.close()
+                    research_store = getattr(service, "research_store", None)
+                    if research_store is not None:
+                        research_store.close()
                     close = getattr(service.broker, "close", None)
                     if close:
                         close()

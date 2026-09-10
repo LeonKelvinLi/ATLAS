@@ -12,6 +12,16 @@ The complete inert examples and configuration contract are in [`deploy/README.md
 
 ## Configuration, state and secrets
 
+The [offline research workflow](research-workflow.md) now has a separate external
+`research_store/research.db` and immutable exported experiment bundles. Replay
+checkpoints and sticky strategy-health databases also belong outside the checkout.
+None are a live execution journal. Optional `portfolio_risk` configuration adds
+server-owned risk gates but cannot supply a provider or snapshot; a trusted
+provider must be assembled separately, and its absence blocks readiness/orders.
+The legacy paper schema now pins fee/model assumptions and the last mutation
+clock. Older simulator state refuses automatic migration rather than inventing
+its historical fee contract.
+
 The new platform uses an explicit external JSON configuration; it does not autoload `.env`. Configuration includes mode, broker selection, persistent state directory, dataset/quote fixture paths, deterministic risk settings and optional HTTP settings. Secret inputs are external owner-only files selected by environment variable; no account number or key is included in examples.
 
 | Selection | Purpose |

@@ -15,7 +15,8 @@ from atlas.domain import (BrokerError, BrokerRejected, OrderRequest, OrderResult
                           UnknownSubmission, decimal, financial_context, json_value)
 from atlas.evidence import EvidenceStore, external_context
 from atlas.ledger import ConflictError, Ledger, digest
-from atlas.risk import RiskPolicy, account_fingerprint, evaluate_risk, position_size
+from atlas.risk import (RiskPolicy, PortfolioRiskPolicy, account_fingerprint, evaluate_risk,
+                        evaluate_portfolio_risk, position_size)
 from atlas.strategies import StrategyRegistry
 
 
@@ -31,11 +32,17 @@ class AtlasService:
     def __init__(self, broker, ledger: Ledger, policy: RiskPolicy, *, datasets=None,
                  evidence: EvidenceStore | None = None, registry=None, approval_key=None,
                  kill_switch_path: Path | None = None, clock=time.time,
-                 stop_event=None, call_timeout=15.0, shutdown_grace=0.2):
+                 stop_event=None, call_timeout=15.0, shutdown_grace=0.2,
+                 portfolio_policy: PortfolioRiskPolicy | None = None, portfolio_context_provider=None):
         scope = "live" if policy.mode.startswith("live-") else policy.mode
         if ledger.scope != scope:
             raise ServiceError("execution journal scope does not match mode")
         self.broker, self.ledger, self.policy = broker, ledger, policy
+        if portfolio_policy is not None and not isinstance(portfolio_policy, PortfolioRiskPolicy):
+            raise ValueError("portfolio policy requires a trusted deterministic policy")
+        if portfolio_context_provider is not None and (portfolio_policy is None or not callable(portfolio_context_provider)):
+            raise ValueError("trusted portfolio provider requires an explicit portfolio policy")
+        self.portfolio_policy, self.portfolio_context_provider = portfolio_policy, portfolio_context_provider
         self.datasets = deepcopy(datasets or {})
         self.evidence = evidence
         self.registry = registry or StrategyRegistry()
@@ -107,6 +114,42 @@ class AtlasService:
         except OSError:
             return True
 
+    def _policy_fingerprint(self):
+        if self.portfolio_policy is None:
+            return self.policy.fingerprint()
+        return digest({"order_policy": self.policy.fingerprint(), "portfolio_policy": self.portfolio_policy.fingerprint()})
+
+    @financial_context
+    def _portfolio_risk(self, signal, account, quote, quantity, limit_price, fingerprint):
+        snapshot = None
+        now = int(self.clock())
+        if self.portfolio_context_provider is not None:
+            try:
+                snapshot = self._call(self.portfolio_context_provider, signal=deepcopy(signal), account=account,
+                                      quote=quote, quantity=quantity, limit_price=limit_price, now=now)
+            except Exception:  # Provider errors cannot create permission or leak provider messages.
+                snapshot = None
+        matches = False
+        try:
+            # Bind trusted historical risk to the account/quote refreshed for this exact proposal.
+            expected_positions = {p.symbol: (p.quantity, p.market_value) for p in account.positions if p.quantity != 0}
+            actual_positions = {p["symbol"]: (decimal(p["quantity"], nonnegative=True), decimal(p["market_value"], nonnegative=True))
+                                for p in snapshot["positions"] if decimal(p["quantity"], nonnegative=True) != 0}
+            matches = (decimal(snapshot["equity"], positive=True) == account.equity
+                       and len(expected_positions) == sum(p.quantity != 0 for p in account.positions)
+                       and len(actual_positions) == sum(decimal(p["quantity"], nonnegative=True) != 0 for p in snapshot["positions"])
+                       and actual_positions == expected_positions and decimal(snapshot["order_mark_price"], positive=True) == quote.bid)
+        except (ValueError, TypeError, KeyError, ArithmeticError):
+            pass
+        report = evaluate_portfolio_risk(self.portfolio_policy, snapshot, now=int(self.clock()),
+                          expected_account_fingerprint=fingerprint, symbol=signal["symbol"], asset_class=signal["asset_class"],
+                          strategy_id=signal["strategy_id"], side=signal["direction"], quantity=quantity,
+                          limit_price=limit_price, estimated_fees=quantity*quote.fee_per_unit)
+        report["checks"].append({"code": "portfolio_account_quote_binding", "passed": matches,
+                                 "detail": "portfolio equity, positions and order mark must match refreshed account and quote"})
+        report["passed"] = all(c["passed"] for c in report["checks"])
+        return report
+
     def _account(self):
         account = self._call(self.broker.get_account)
         if account.account_id != self.policy.expected_account_id:
@@ -134,6 +177,15 @@ class AtlasService:
                     "reason": "no configured verified dataset for this symbol",
                     "model_probability": None, "confidence": None, "trade_submitted": False}
         dataset = self.datasets[symbol]
+        if str(dataset.get("role", "")).lower() in {"holdout", "sealed_holdout"} or str(dataset.get("evidence_kind", "")).lower() in {"holdout", "sealed_holdout"}:
+            raise ServiceError("protected holdout data cannot generate ordinary research or trading signals")
+        research_store = getattr(self, "research_store", None)
+        if research_store is not None:
+            from atlas.research.store import content_hash
+            # This compatibility signal path consumes legacy bar dictionaries,
+            # which cannot prove canonical observation disjointness. An active
+            # seal therefore blocks it; canonical research uses the lab guard.
+            research_store.assert_development_access(content_hash(dataset["bars"]), content_hash({"symbol": symbol}))
         analysis = self.registry.analyze(symbol, dataset["asset_class"], dataset["bars"], now=int(self.clock()))
         for signal in analysis["signals"]:
             signal["data_kind"] = dataset.get("evidence_kind", "unverified")
@@ -176,6 +228,8 @@ class AtlasService:
             # attempts before the next order. Competing committed attempts
             # remain counted, including rejected attempts.
             stats = {**stats, "intents_count": max(0, stats["intents_count"] - 1)}
+        portfolio = (self._portfolio_risk(signal, account, quote, quantity, limit_price, fingerprint)
+                     if self.portfolio_policy is not None else None)
         report = evaluate_risk(self.policy, account, quote, symbol=signal["symbol"],
                                asset_class=signal["asset_class"], side=signal["direction"],
                                quantity=quantity, limit_price=limit_price, strategy=signal,
@@ -190,6 +244,10 @@ class AtlasService:
         if self.policy.mode.startswith("live-") and signal.get("data_kind") != "verified_live":
             report["checks"].append({"code": "evidence_provenance", "passed": False,
                                      "detail": "synthetic, historical and unverified data cannot authorize live execution"})
+        if portfolio is not None:
+            report["portfolio_risk"] = portfolio
+            report["checks"].extend(portfolio["checks"])
+        report["policy_hash"] = self._policy_fingerprint()
         report["passed"] = all(c["passed"] for c in report["checks"])
         return account, quote, report
 
@@ -230,7 +288,7 @@ class AtlasService:
                           "side": signal["direction"], "quantity": str(qty), "order_type": "limit",
                           "limit_price": str(price)},
                 "created_at": now, "expires_at": now + self.policy.proposal_ttl_seconds,
-                "policy_hash": self.policy.fingerprint(), "quote": json_value(quote),
+                "policy_hash": self._policy_fingerprint(), "quote": json_value(quote),
                 "evidence": signal, "risk": risk,
                 "status": "risk_rejected" if not risk["passed"] else
                           "awaiting_approval" if self.policy.mode == "live-assisted" else "prepared",
@@ -246,7 +304,7 @@ class AtlasService:
 
     def _verify_proposal(self, proposal, receipt):
         now = int(self.clock())
-        if proposal["mode"] != self.policy.mode or proposal["policy_hash"] != self.policy.fingerprint():
+        if proposal["mode"] != self.policy.mode or proposal["policy_hash"] != self._policy_fingerprint():
             raise ServiceError("proposal no longer matches the configured mode or policy")
         if not proposal["created_at"] <= now < proposal["expires_at"]:
             raise ServiceError("proposal has expired or is not yet valid")
@@ -427,7 +485,7 @@ class AtlasService:
                         "account_fingerprint": fingerprint, "mode": self.policy.mode,
                         "broker": self.broker.capabilities.broker, "created_at": now,
                         "expires_at": now + self.policy.proposal_ttl_seconds,
-                        "policy_hash": self.policy.fingerprint(), "strategy_id": target["strategy_id"],
+                        "policy_hash": self._policy_fingerprint(), "strategy_id": target["strategy_id"],
                         "strategy_version": target["strategy_version"],
                         "order": {"target_proposal_id": target_proposal_id,
                                   "broker_order_id": intent["broker_order_id"], "symbol": target["order"]["symbol"]},
@@ -524,6 +582,8 @@ class AtlasService:
                                           "unknown_count": unknown_fees, "order_intent_count": len(execution_fees),
                                           "basis": "acknowledged_fees_across_order_intents_excluding_cancellation_intents"},
                        "pnl_basis": "broker_reported_realized_cost_basis_pnl_for_terminal_positive_fill_sell_orders",
+                       "per_strategy_basis": "exit_order_strategy_attribution_only; pooled position costs may originate from other strategies",
+                       "per_strategy_alpha_established": False,
                        "time_basis": "intent_creation_time_window_not_broker_fill_dates",
                        "dates_are_fill_dates": False,
                        "window_may_be_truncated": len(intents) == 1000,
@@ -552,6 +612,8 @@ class AtlasService:
         fingerprint = account_fingerprint(self.broker.capabilities.broker, self.policy.expected_account_id)
         if self.ledger.has_pending(fingerprint):
             blockers.append("outstanding_order_requires_reconciliation")
+        if self.portfolio_policy is not None and self.portfolio_context_provider is None:
+            blockers.append("trusted_portfolio_risk_provider_unavailable")
         if live:
             blockers.append("broker connectivity and complete risk-data preflight have not been performed")
             if not self.policy.live_enabled:

@@ -25,3 +25,5 @@ jobs:
         run: uv run --locked python demo.py
       - name: Run in-memory platform demo
         run: uv run --locked python -m atlas demo
+      - name: Reproduce temporary synthetic research experiment
+        run: uv run --locked python -m atlas research demo
