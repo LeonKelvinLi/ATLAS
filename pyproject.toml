@@ -5,6 +5,7 @@ description = "AI-assisted quantitative research with deterministic risk, durabl
 requires-python = ">=3.12"
 dependencies = [
   "mcp>=1.28,<2",
+  "pyjwt[crypto]>=2.13,<3",
   "duckdb",
   "pandas",
   "pandera",

@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "product_id": "BTC-USD",
+  "allocation_usd": "100",
+  "order_budget_usd": "2",
+  "maker_fee_bps": null,
+  "taker_fee_bps": null
+}

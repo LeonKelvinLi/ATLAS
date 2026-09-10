@@ -182,8 +182,10 @@ explain the refusal. The [account configuration contract](https://docs.alpaca.ma
 documents suspension and fractional-trading settings; the dashboard agrees with
 the earlier active account snapshot.
 
-The next step is provider diagnosis using the
-[prepared support draft](alpaca-paper-support-draft.md), which has **not been
-sent**. Do not reset the journal, replenish the attempt budget, raise the paper
+The next step is provider diagnosis. The
+[support request](alpaca-paper-support-draft.md) was sent to Alpaca on September
+10 after Leon authorized continuation; Gmail confirmed `SENT`. Support
+acknowledgement and resolution remain unverified. Do not reset the journal,
+replenish the attempt budget, raise the paper
 balance or submit another order to recover an error message. The earlier $100
 account/API check is recorded in [the connection report](alpaca-paper-connection.md).

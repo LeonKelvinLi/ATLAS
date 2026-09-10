@@ -1,4 +1,9 @@
-# Alpaca support draft — not sent
+# Alpaca support request — sent September 10, 2026
+
+Sent to `support@alpaca.markets` after Leon continued the prepared request.
+Gmail returned the `SENT` label. The external evidence directory contains
+`support-sent-receipt.json`; delivery, support acknowledgement and resolution
+have not yet been verified. The body below was sent as plain text.
 
 Subject: Paper BTC/USD limit order rejected with 40310000 despite active account and $100 buying power
 
@@ -52,6 +57,5 @@ Thank you.
 
 ---
 
-This draft contains no API keys or secrets. Send it through the authenticated
-Alpaca support channel only after Leon authorizes sending. No message or support
-ticket has been created.
+The sent message contained no API keys or secrets. No additional paper order
+was submitted, and the existing pilot journal remains halted.
