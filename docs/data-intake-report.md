@@ -118,4 +118,129 @@ remain **1/10**; the public snapshot is not sufficient independent strategy
 evidence. Server selection, actual recovery rehearsal, authentication and owner
 activation remain separate unfinished stages.
 
-Final verification and observed diagnostic results are appended below.
+## Observed diagnostic result
+
+Evidence class: **`HISTORICAL_UNVERIFIED`**. `alpha_validation_eligible: false`.
+
+**No candidate demonstrates sufficient evidence.** The primary is `REJECTED`
+within this diagnostic. This does not prove that an entire strategy family can
+never work; it rejects this parameterization's observed result under these
+assumptions. The importer and exact reproduction succeeded.
+
+Both archives retain **288 expected hourly candles, zero missing buckets and one
+explicitly excluded endpoint row**. There are zero spread observations and no
+recovered historical revision stream. The acquisition-only archive preserves
+unknown publication and volume units. Only the separately labeled assumed-history
+archive was used for the experiment.
+
+One immutable attempt completed **33 of 33 predeclared variants**: four candidates,
+five controls/ensemble, six additional-cost levels, three execution scenarios,
+nine perturbations and six fold replays. These are not 33 independent strategies.
+The primary alone receives the complete gauntlet; other candidate scorecards
+explicitly state their partial coverage.
+
+All figures below are modeled net marked portfolio returns over the same
+development evaluation window, **September 5 at 05:01 UTC through September 10
+at 00:01 UTC**. Annualized returns and Sharpe remain unavailable.
+
+| Fixed strategy/control | Net return | Interpretation |
+|---|---:|---|
+| Momentum, lookback 10 — primary | **−0.244%** | Rejected; below cash and conditional controls |
+| Mean reversion, lookback 10 | −0.271% | Rejected; partial scorecard |
+| Moving-average rule, lookback 10 | 0.000% | No fills; no superiority to cash |
+| Volatility-scaled momentum, lookback 10 | −0.076% | Rejected; partial scorecard |
+| Cash | 0.000% | No exposure |
+| Full-allocation buy-and-hold | −1.720% | Different exposure from the primary; not a matched-risk win |
+| Exposure-conditioned buy-and-hold | −0.049% | Conditional diagnostic; realized exposure not exactly matched |
+| Conditional random control | +0.026% | Uses observed intent weights; not a deployable selected strategy |
+| Equal-weight ensemble | −0.142% | No positive result |
+
+The primary had **70 usable feature timestamps**, **14 order intents**, **four
+simulated fills** and **two realized sell fills**. Ten intents were rejected as
+below-minimum/no-change. Sell fills are not an independent-trade sample. The
+modeled primary loss was **$24.36 on $10,000 starting cash**, with observed maximum
+drawdown **0.293%**. There was no real account loss or live execution.
+
+Adding 20 fee bps on each side worsened the primary return to **−0.403%**. It was
+already negative at zero *additional* fees; that case still includes normal
+fees, spread and slippage. The saved cost report's
+`execution_assumptions_verified` field checks consistency across the modeled
+cost sweep, not whether actual venue execution assumptions are authenticated.
+Similarly, replay's `data_quality_passed` is a simulator setting, not the dataset's
+alpha-validation eligibility. The separately assessed strategy-health report is
+`DISABLED` because the research data-quality gate is not satisfied.
+
+## Exact identity and reproduction
+
+Implementation commit: `62267f4b51f1332227357cd0ef792af23f689f74`.
+
+Experiment: `exp_c22c0ebc0b7c4ba2bd504154248187c5`.
+
+Result SHA256:
+`7f22214c8648c574ba61b4501e6be5605a1eef959ff5a102a72bef3dd2bafa45`.
+
+Assumed-history canonical dataset SHA256:
+`1032eccd44b7ead1fecac208cc3ce43b3b535b785ee28fc13313eba6d6f333cb`.
+
+The retained bundle has **39 files / 1,509,627 bytes**, including its manifest,
+quality report, source and feature lineage, complete trial plan, orders, fills,
+equity history, scorecards, costs and limitations. The exact reproduction check
+returned `reproduced: true`, `identical_source_bytes: true` and
+`new_attempt_recorded: false`. The report-only commit after the implementation
+does not alter its source bytes. Future source changes require the pinned
+implementation for reproduction.
+
+```bash
+uv run --locked python -m atlas research run \
+  --dataset /Users/leon/Desktop/dev/ATLAS-research-evidence/data-intake-20260909/assumed-history/dataset.json \
+  --store /Users/leon/Desktop/dev/ATLAS-research-evidence/data-intake-20260909/research \
+  --config /Users/leon/Desktop/dev/ATLAS-research-evidence/data-intake-20260909/plan.json
+
+uv run --locked python -m atlas research reproduce \
+  --experiment-id exp_c22c0ebc0b7c4ba2bd504154248187c5 \
+  --store /Users/leon/Desktop/dev/ATLAS-research-evidence/data-intake-20260909/research \
+  --dataset /Users/leon/Desktop/dev/ATLAS-research-evidence/data-intake-20260909/assumed-history/dataset.json
+```
+
+The first command above records the actual completed run; use **reproduce** to
+check it rather than creating another experiment. Command arguments, exit codes
+and outputs are retained as `diagnostic-command.json` and
+`reproduction-command.json`. A compact inspection is saved in
+`diagnostic-summary.json` beside them.
+
+Open the [compact diagnostic summary](/Users/leon/Desktop/dev/ATLAS-research-evidence/data-intake-20260909/diagnostic-summary.json),
+[import quality report](/Users/leon/Desktop/dev/ATLAS-research-evidence/data-intake-20260909/assumed-history/quality.json),
+or [primary scorecard](/Users/leon/Desktop/dev/ATLAS-research-evidence/data-intake-20260909/research/results/exp_c22c0ebc0b7c4ba2bd504154248187c5/scorecard.json)
+for the exact saved values.
+
+## Final verification and Git state
+
+| Check | Observed result |
+|---|---|
+| `uv sync --locked --group dev` | Success; 78 packages resolved / 67 checked |
+| `uv run --locked python -m pytest -q -ra` | **1,252 passed, 2 skipped in 44.43 seconds** |
+| Targeted importer, CLI and market tests | **108 passed** |
+| New CLI plus existing interface checks | **33 passed** |
+| Undefined-name checks for new/edited research modules | Passed |
+| `git diff --check` | Passed |
+| Both public-data import archives | Exact raw/conversion verification passed |
+| Diagnostic artifact reproduction | Exact canonical artifact hash matched |
+| Eight frozen model/protocol/history files | All byte hashes match pre-change snapshot |
+| Experiment source files | All 82 match the completed experiment's pinned bytes |
+| ATLAS application process check | None detected at final handoff |
+
+The skips require the optional legacy `iqoptionapi.constants` package and an
+explicitly selected private DuckDB dataset. The new tests use generated
+provider-shaped fixtures, block network and broker operations, and exercise
+timestamp mapping, precision, ordering, incomplete data, window coverage,
+assumptions, tampered receipts/files, special files, symlinks and overwrite refusal.
+Independent code review and the first real import exposed no unresolved failure.
+
+Work remains on `codex/atlas-offline-onboarding`. The implementation and this
+subsequent report are committed locally, eight commits ahead and zero behind
+the read-only verified remote main
+`9800677ec1a5fa7a1c53e3e4e6b1554ea8085378`. Nothing was pushed. No brokerage
+authentication, order submission, deployment, service, listener, startup job or
+one-time forward evaluation occurred. The public HTTP GET was read-only market
+data acquisition. No ATLAS application process was started; final handoff checks
+the working tree and process state separately.
