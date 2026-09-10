@@ -8,6 +8,12 @@ ATLAS is prepared for further Linux integration work. **No service, broker sessi
 
 Research defaults to unavailable account data, not a generated portfolio. The default CLI prints help. The offline `python -m atlas demo` uses in-memory synthetic data. `config-check` validates an explicit external configuration without creating state or contacting a broker. Actual MCP startup is a separate intentional command and was not run here.
 
+The [Alpaca paper connectivity pilot](alpaca-paper-pilot.md) is a separate explicit
+CLI with pinned paper REST endpoints and one irreversible $2 test-order attempt.
+It does not activate this service factory, a strategy, worker, listener or host
+deployment. Its provider receipt is separate from the offline verification and
+from general broker or live readiness.
+
 The complete inert examples and configuration contract are in [`deploy/README.md`](../deploy/README.md), [`research-config.example.json`](../deploy/research-config.example.json), and [`atlas.service.example`](../deploy/atlas.service.example). These are source files, not installed host configuration.
 
 ## Configuration, state and secrets

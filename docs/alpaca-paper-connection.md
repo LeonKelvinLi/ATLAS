@@ -30,8 +30,10 @@ Account, positions and orders were separate observations, not an atomic snapshot
 
 The preflight reported zero orders submitted and zero account mutations. Creating
 the paper account and generating its keys were earlier, separate dashboard
-mutations. No real funds were deposited or allocated, and no broker paper or real
-trade was placed. The full account number and secret values are excluded here.
+mutations. At this connection checkpoint, no real funds were deposited or
+allocated and no broker paper or real trade had been placed. Later bounded paper
+execution is tracked in [the pilot report](alpaca-paper-pilot.md). The full account
+number and secret values are excluded here.
 
 The private directory `/Users/leon/.config/atlas/alpaca-paper` has mode `0700`.
 The selected paper credentials are saved in `paper-keys.json`; the redacted
@@ -174,9 +176,12 @@ research/model/journal hashes are unchanged. Full output is retained in
 
 ## What remains after connection
 
-Broker paper execution still needs a reviewed adapter, complete durable order
+Ongoing strategy execution still needs complete durable order and activity
 reconciliation, an established $100 funding baseline or allocation ledger,
 fees/realized-P&L accounting and a genuine prospective data/strategy protocol.
+The separate [bounded paper pilot](alpaca-paper-pilot.md) implements a single
+connectivity order and cancellation with an irreversible attempt cap. It does not
+assemble the ongoing strategy service or invent missing P&L and fee measures.
 The ATLAS deployment factory remains unavailable for real broker operations;
 the read-only preflight is not an execution adapter and does not install a worker.
 
@@ -196,7 +201,7 @@ chosen feed, provider timestamps and receipt times.
 [crypto streaming data](https://docs.alpaca.markets/docs/real-time-crypto-pricing-data).
 
 The dedicated $100 broker paper account is verified through both the Chrome
-dashboard and authenticated paper API reads. Broker execution remains disabled
-and unimplemented. No broker paper or real orders have been placed.
-The prior local $100 synthetic smoke remains a separate, completed engineering
-test.
+dashboard and authenticated paper API reads. Automatic strategy execution remains
+disabled. The later one-time paper lifecycle test and its actual broker results
+belong in [the pilot report](alpaca-paper-pilot.md). The prior local $100 synthetic
+smoke remains a separate, completed engineering test.

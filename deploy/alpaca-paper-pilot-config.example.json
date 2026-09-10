@@ -1,0 +1,5 @@
+{
+  "schema": 1,
+  "key_file": "/absolute/private/alpaca-paper/paper-keys.json",
+  "expected_account_fingerprint": "REPLACE_WITH_VERIFIED_PAPER_ACCOUNT_FINGERPRINT"
+}
