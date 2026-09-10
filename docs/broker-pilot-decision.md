@@ -1,5 +1,10 @@
 # Broker decision and $100 test preparation
 
+**Connection update:** the subsequent Alpaca installation exposed 24 market-data
+tools, with successful BTC/USD asset and quote reads. This installed plugin has
+no account or order tools. It is distinct from the broader provider-hosted/local
+Trading MCP described below. See [paper connection status](alpaca-paper-connection.md).
+
 September 9, 2026 (America/Los_Angeles). Leon confirmed existing Robinhood and
 IQ Option accounts, with Robinhood registered in the United States. The proposed
 funded budget is **$100 of starting capital, with no automatic top-ups**. No real
@@ -51,15 +56,16 @@ Sources: [Robinhood overview](https://robinhood.com/us/en/support/articles/agent
 
 ## MCP inventory and selection
 
-The current callable-tool inventory contains **no broker account MCP**. Alpaca,
+At the start of this review, the callable-tool inventory contained **no broker account MCP**. Alpaca,
 Webull, IBKR, Longbridge and the data/research plugins below appeared in the
 user-supplied list of available but uninstalled plugins. That listing does not
 prove usable permissions or account connectivity. Robinhood's official remote
 MCP was verified independently of that list.
 
 This is a bounded review of relevant candidates, not an exhaustive directory of
-every community server. No integration was installed, authenticated or granted
-access. Prefer provider-owned services to password/cookie-based community wrappers.
+every community server. No integration was installed during the comparison itself;
+the later Alpaca data-plugin installation is recorded in the update above.
+Prefer provider-owned services to password/cookie-based community wrappers.
 
 | MCP / plugin | Role | Selection for this experiment |
 |---|---|---|
