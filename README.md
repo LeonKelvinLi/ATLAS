@@ -118,6 +118,13 @@ explicitly synthetic example with an exact reproduction check. It starts no serv
 Use the [forensic audit](docs/research-forensic-audit.md) and
 [data inventory](docs/data-inventory.md) to understand the limits of historical evidence.
 
+An explicit `research import-coinbase` command now archives a supplied public
+candle response with raw bytes, mapping assumptions and quality checks;
+`research verify-import` reproduces the conversion. Neither command fetches data
+or runs research. Historical availability defaults to unknown. The bounded
+[real-data intake continuation](docs/data-intake-report.md) keeps retrospective
+diagnostics separate from authenticated point-in-time or prospective evidence.
+
 The repository contains three historical FX-binary model snapshots and research ledgers, but lacks the full market database and operational logs needed to reproduce the recorded edge. Historical candidate win rates include rejected orders; the recorded practice sample is small and clustered. There is no verified funded-live result here. **ATLAS has not demonstrated that its current model beats simple baselines after realistic costs.**
 
 The [quantitative audit](docs/quantitative-audit.md) traces leakage, selection, contract and sample-size limitations. This batch adds opt-in causal features `2.0.0`, builds cross-asset context before future-label filtering, strengthens chronological validation, and compares fixed momentum/mean-reversion rules with buy-and-hold and a seeded random control using explicit costs. Only synthetic fixtures were evaluated; no market-data winner was selected.

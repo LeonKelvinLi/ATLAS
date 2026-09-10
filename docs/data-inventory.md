@@ -1,5 +1,11 @@
 # Local market-data inventory and point-in-time contract
 
+**Subsequent intake:** the [data-intake continuation](data-intake-report.md) retains
+one small public Coinbase BTC-USD response outside Git. It is a current historical
+snapshot with unverified original publication/revision semantics, not recovered
+canonical FX history or an alpha-eligible dataset. The original inventory below
+describes the earlier audit and remains unchanged.
+
 Read-only inventory performed on 2026-09-09 against the development checkout at
 `/Users/leon/Desktop/dev/ATLAS`, starting from commit `db01ee0`. No broker,
 collector, network download, training job, frozen pickle deserialization or

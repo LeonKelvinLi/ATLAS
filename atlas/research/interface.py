@@ -131,10 +131,39 @@ def add_research_parser(commands):
     inventory = sub.add_parser("inventory", help="read recorded attempts without rerunning experiments")
     inventory.add_argument("--store", required=True)
     inventory.add_argument("--limit", type=int, default=20)
+    ingest = sub.add_parser("import-coinbase", help="archive an explicit Coinbase candle export; no network or experiment")
+    ingest.add_argument("--input", required=True, help="external raw JSON response file")
+    ingest.add_argument("--output", required=True, help="new external archive directory; parent must exist")
+    ingest.add_argument("--product-id", required=True, help="explicit USD crypto product, for example BTC-USD")
+    ingest.add_argument("--granularity", type=int, required=True, choices=(60, 300, 900, 3600, 21600, 86400))
+    ingest.add_argument("--captured-at", type=int, required=True, help="declared acquisition time in UTC epoch seconds")
+    ingest.add_argument("--request-start", type=int, help="inclusive requested bar-open boundary in UTC seconds")
+    ingest.add_argument("--request-end", type=int, help="inclusive requested bar-close boundary in UTC seconds")
+    ingest.add_argument("--request-url", help="optional captured public request URL; must match product, interval and window")
+    ingest.add_argument("--assumed-publication-lag-seconds", type=int,
+                        help="explicit hypothetical close-to-publication delay; default historical availability unknown")
+    ingest.add_argument("--volume-unit", choices=("unknown", "base_asset"), default="unknown",
+                        help="explicit volume-unit declaration; default unknown")
+    ingest.add_argument("--source-kind", choices=("real", "test", "synthetic", "unknown"), default="real",
+                        help="operator source classification, never provider authentication")
+    verify = sub.add_parser("verify-import", help="verify raw bytes and reproduce the imported archive without research")
+    verify.add_argument("--archive", required=True)
 
 
 def research_command(args):
     from atlas.config import _json_file, external_path
+    if args.research_command == "import-coinbase":
+        from atlas.research.imports import import_coinbase_candles
+        return import_coinbase_candles(
+            input_path=args.input, output_dir=args.output, product_id=args.product_id,
+            granularity=args.granularity, captured_at=args.captured_at,
+            request_start=args.request_start, request_end=args.request_end,
+            request_url=args.request_url,
+            assumed_publication_lag_seconds=args.assumed_publication_lag_seconds,
+            volume_unit=args.volume_unit, source_kind=args.source_kind)
+    if args.research_command == "verify-import":
+        from atlas.research.imports import verify_import_archive
+        return verify_import_archive(args.archive)
     def checked_store(value):
         external_path(value)
         original = Path(value).expanduser()

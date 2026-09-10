@@ -1,8 +1,9 @@
 # Offline research workflow
 
 ATLAS can now record and reproduce a bounded research experiment. It has not
-established a profitable strategy. The current local inventory lacks suitable
-point-in-time market history; generated data demonstrate software behavior only.
+established a profitable strategy. A small retained public candle snapshot now
+supports import and retrospective diagnostics; authenticated historical publication
+and revision evidence is still missing. Generated data demonstrate software behavior only.
 
 ## One command, no account or service
 
@@ -28,6 +29,57 @@ other candidates receive explicitly incomplete scorecards. There is no winner
 selection or automatic promotion.
 
 ## Explicit external dataset
+
+### Import a Coinbase Exchange candle export without starting research
+
+The importer reads an already captured response; it does not fetch data, start
+a feed, open a broker session or run a strategy. It supports one USD crypto
+product and one response of at most 300 candles. Supply the actual acquisition
+time and request window, with integer UTC epoch seconds:
+
+```bash
+uv run --locked python -m atlas research import-coinbase \
+  --input /absolute/external/coinbase-response.json \
+  --output /absolute/external/new-import-archive \
+  --product-id BTC-USD --granularity 3600 \
+  --captured-at 1789015734 \
+  --request-start 1787961600 --request-end 1788998400
+uv run --locked python -m atlas research verify-import \
+  --archive /absolute/external/new-import-archive
+```
+
+The numbers above identify the retained September 2026 example, not fresh data.
+For another export, use its actual recorded acquisition time and requested range.
+The output directory must be new and its parent must exist. The archive retains
+raw bytes, canonical dataset, mapping receipt and quality report. Verification
+recomputes the conversion and checks the archived bytes. These hashes detect
+changed files; they do not authenticate an operator's source or timestamp claims.
+
+Default historical availability and volume units are **unknown**. Historical bars
+share the acquisition clock because original publication times are absent. This
+archive is deliberately unsuitable for chronological replay: do not invent
+different publication times or weaken the gauntlet's minimum event count.
+
+For an explicitly hypothetical retrospective diagnostic, select a **separate new
+output directory** and additionally pass
+`--assumed-publication-lag-seconds 60 --volume-unit base_asset`. This declares
+close-plus-60-seconds availability and base-asset volume as assumptions. The result
+remains `HISTORICAL_UNVERIFIED`, `latest_only` and ineligible for alpha validation.
+It is not prospective paper/shadow evidence. Revision zero means the first retained
+snapshot, not a recovered original publication.
+
+The mapping converts bucket starts to closes, reverses strictly descending exports
+explicitly, and records requested-window exclusions. It refuses mixed ordering,
+duplicates and unfinished retained bars. Gaps remain visible without imputation.
+Source product identity is declared because the six-value response contains no
+product identifier. Do not relabel a fixture as market evidence; generated inputs
+must use `--source-kind test` or `--source-kind synthetic`.
+
+The [intake continuation report](data-intake-report.md) records the bounded public
+sample and the remaining evidence gaps. No provider license or permission to
+redistribute data is conferred by the importer.
+
+### Run a declared diagnostic plan
 
 ```bash
 uv run --locked python -m atlas research run \
