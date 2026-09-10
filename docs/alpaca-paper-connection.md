@@ -1,23 +1,46 @@
 # Alpaca connection and paper-account preflight
 
-Connection observed September 9, 2026 local time / September 10 UTC.
+Market-data connection observed September 9, 2026 local time / September 10 UTC.
+Dedicated paper-account setup verified in Chrome on September 10, 2026 local time;
+authenticated paper REST preflight completed at 08:13:48 PDT / 15:13:48 UTC.
 
-## Current browser handoff
+## Current paper account
 
-The owner subsequently authorized Google sign-in, completing the setup and
-accepting the paper-account terms. Chrome reached the official
-`https://app.alpaca.markets/signup` form. The current login and signup screens
-offer email/password authentication; no Google sign-in option was shown.
-Registration requires first/last name, country of tax residence, email, a new
-password and a referral-source selection. No personal fields were filled and
-the registration was not submitted. The non-binding cookie notice was accepted.
-The signup tab is retained for owner entry and verification.
+The owner completed signup and verification. A new dedicated simulated account
+named **ATLAS $100 Paper** was created and selected in the official Alpaca
+dashboard. Chrome inspection verified the following displayed state:
 
-An empty private directory was prepared at
-`/Users/leon/.config/atlas/alpaca-paper` with mode `0700`; no existing files or
-permissions were changed and no credentials were read or written. The planned
-key file is `paper-keys.json` and the planned read-only result is
-`preflight-account.json` in that directory. Neither file has been created.
+| Field | Verified state |
+|---|---|
+| Account | ATLAS $100 Paper, simulated paper account |
+| Account / crypto status | ACTIVE / ACTIVE in the paper API |
+| Cash / equity | $100 / $100 in Chrome and the paper API |
+| Non-marginable buying power | $100 in Chrome and the paper API |
+| Open positions / market value | None / $0 in Chrome; empty positions API result |
+| Orders | None displayed in Chrome; complete empty open-orders API result |
+| Trading/account blocks and user suspension | All false in the paper API |
+| Execution enabled | False |
+
+The existing preflight CLI ran once with the selected paper account's credentials
+and verified the pinned `https://paper-api.alpaca.markets` endpoint over TLS.
+Its three read-only requests completed within approximately 0.812 seconds.
+Account, positions and orders were separate observations, not an atomic snapshot.
+`paper_account_read_verified` and `current_state_matches_100` are true;
+`immutable_starting_capital_verified` remains false.
+
+The preflight reported zero orders submitted and zero account mutations. Creating
+the paper account and generating its keys were earlier, separate dashboard
+mutations. No real funds were deposited or allocated, and no broker paper or real
+trade was placed. The full account number and secret values are excluded here.
+
+The private directory `/Users/leon/.config/atlas/alpaca-paper` has mode `0700`.
+The selected paper credentials are saved in `paper-keys.json`; the redacted
+read-only result is `preflight-account.json` in the same directory. Both files
+were verified as regular files, mode `0600`, owned by the current user.
+The report, rather than the credentials, was read for this documentation update.
+
+`preflight-account.json` SHA256:
+`fd7031dddedf4b111970c15217db5fd18793908328939c12eeb605cfc1b65d02`.
 
 ## What is connected
 
@@ -29,9 +52,11 @@ in Alpaca's public documentation is a distinct capability; installing this data
 plugin does not make that trading interface available.
 
 Two connector tool calls succeeded: `get_asset` for `BTC/USD`
-and `get_crypto_latest_quote` for `BTC/USD`, feed `us`. No private account was
-read. Whether the connector uses provider-managed data credentials or a particular
-user paper account was not established and is not inferred from the data response.
+and `get_crypto_latest_quote` for `BTC/USD`, feed `us`. These market-data calls
+did not read a private account. Whether the connector uses provider-managed data
+credentials or a particular user paper account was not established and is not
+inferred from the data response. The later authenticated paper-account read
+described above used the standalone REST preflight, not an account MCP tool.
 
 | Observed field | Returned value |
 |---|---|
@@ -53,30 +78,27 @@ The original MCP responses and connection summary are outside Git:
 This retains the connector's text and structured responses, not the underlying
 broker's raw HTTP response bytes.
 
-## Establish the dedicated paper account
+## Completed account connection
 
-The next owner action is signing in to Alpaca's paper dashboard. Creating an
-account, managing authentication and generating private keys remain owner steps.
-No real-money brokerage account or deposit is needed for this paper test.
+The dedicated account has been created successfully with the requested $100
+simulated starting amount. No real-money brokerage account or deposit is needed
+for this paper test.
 [Official paper-trading guide](https://docs.alpaca.markets/docs/paper-trading).
 
-1. Preserve existing paper accounts and their history. The newer dashboard guide
-   documents the account-number menu, then **Open New Paper Account**.
-2. If the current creation form permits a starting amount, choose **$100** for a
-   new dedicated ATLAS paper account. The exact form and $100 acceptance have
-   not been observed here. Public docs still describe a $100,000 default and
-   contain both older reset instructions and newer create/delete instructions.
-3. If the form forces a larger balance, stop before calling it the $100 pilot.
-   A separately durable allocation ledger would be needed; returning
-   `min(broker_cash, 100)` would repeatedly replenish the apparent budget after
-   losses. The local simulator's capital commitment cannot constrain Alpaca.
-4. Generate API credentials for that selected paper account only. Keep them in
-   an owner-selected private file outside the repository. Do not paste them in
-   the conversation or substitute keys for a live account.
+The connection workflow selected **ATLAS $100 Paper**, generated its paper API
+credentials, saved them privately outside the repository, and completed the
+read-only preflight. Its account identity is retained as a fingerprint in the
+private report. The current UI and API state agree on the $100 flat account.
+
+A durable funding baseline and complete account-activity reconciliation remain
+prerequisites for broker paper execution. The successful current-state check
+does not enforce future funding or an immutable $100 allocation.
 
 There is no verified Trading API operation for changing the paper account's
 starting cash. Do not delete/reset an existing account to bypass failed limits
-or clear losses. No account creation, reset or deletion occurred in this work.
+or clear losses. Returning `min(broker_cash, 100)` would repeatedly replenish an
+apparent budget after losses; the local simulator's capital commitment cannot
+constrain the broker account.
 
 ## Read-only preflight contract
 
@@ -104,12 +126,12 @@ execution disabled, even when its current-state checks pass.
 [positions](https://docs.alpaca.markets/us/reference/getallopenpositions.md),
 [orders](https://docs.alpaca.markets/us/reference/getallorders-1.md).
 
-### Run after the owner has prepared the paper credentials
+### Repeat the read-only preflight when needed
 
-Use an external JSON file with exactly `api_key` and `api_secret`, containing
-the selected paper account's values. Create it privately in an editor and make
-it readable/writable only by its owner (`0600`). Neither value belongs in a
-command argument, source file, log or chat message.
+The prepared external JSON file contains exactly `api_key` and `api_secret`
+for the selected paper account. It remains readable/writable only by its owner
+(`0600`). Neither value belongs in a command argument, source file, log or chat
+message. Any replacement file must retain this format and private permissions.
 
 Template to save privately outside the checkout, replacing the placeholders
 locally:
@@ -121,11 +143,13 @@ locally:
 }
 ```
 
-From the ATLAS checkout, the operator can run:
+For a later repeat, select a new report filename. The original
+`preflight-account.json` is preserved and cannot be overwritten by the CLI:
 
 ```text
-uv run --locked python scripts/alpaca_paper_preflight.py \
-  --key-file /absolute/private/alpaca-paper-keys.json \
+/Users/leon/Desktop/dev/ATLAS/.venv/bin/python -B \
+  /Users/leon/Desktop/dev/ATLAS/scripts/alpaca_paper_preflight.py \
+  --key-file /Users/leon/.config/atlas/alpaca-paper/paper-keys.json \
   --output /absolute/private/new-paper-preflight.json
 ```
 
@@ -134,9 +158,9 @@ path must be a new external file. Account identity is represented by a fingerpri
 credentials and the account number are excluded. The command never changes the
 local $100 smoke account or the remote paper account.
 
-This command has not been run with real paper API credentials. Its credential
-and response handling is verified using fake transports and generated fixtures.
-All 55 targeted tests passed, covering wrong origins, redirects, oversized and
+The first authenticated run completed successfully as recorded above. Credential
+and response handling were also verified using fake transports and generated
+fixtures. All 55 targeted tests passed, covering wrong origins, redirects, oversized and
 malformed responses, invalid financial fields, unknown permissions, oversized
 paper balances, truncated order listings, private-file permissions, key-file
 symlinks, error redaction and report overwrite refusal. Independent review found
@@ -153,7 +177,14 @@ research/model/journal hashes are unchanged. Full output is retained in
 Broker paper execution still needs a reviewed adapter, complete durable order
 reconciliation, an established $100 funding baseline or allocation ledger,
 fees/realized-P&L accounting and a genuine prospective data/strategy protocol.
-The ATLAS deployment factory remains unavailable for real broker operations.
+The ATLAS deployment factory remains unavailable for real broker operations;
+the read-only preflight is not an execution adapter and does not install a worker.
+
+The authenticated report's four remaining blockers are
+`execution_not_implemented`, `immutable_starting_capital_unverified`,
+`daily_realized_pnl_unavailable`, and `order_fee_estimate_unavailable`.
+Reported account accrued fees were $0; estimated order fees and daily realized
+P&L remain null. An accrued-fee balance cannot supply those missing measures.
 
 Crypto paper fee deductions were not established from the public documentation.
 Keep observed broker fees and modeled costs separate; later fee activities can
@@ -164,6 +195,8 @@ chosen feed, provider timestamps and receipt times.
 [activities](https://docs.alpaca.markets/docs/account-activities),
 [crypto streaming data](https://docs.alpaca.markets/docs/real-time-crypto-pricing-data).
 
-No paper API credentials have been supplied to ATLAS, no broker paper account
-has been verified, and no broker paper or real orders have been placed. The prior
-local $100 synthetic smoke remains a separate, completed engineering test.
+The dedicated $100 broker paper account is verified through both the Chrome
+dashboard and authenticated paper API reads. Broker execution remains disabled
+and unimplemented. No broker paper or real orders have been placed.
+The prior local $100 synthetic smoke remains a separate, completed engineering
+test.
