@@ -1,11 +1,4 @@
-"""The per-order PRACTICE guard must be present and structurally correct.
-
-A behavioural test would need the whole broker session, so this pins the
-guard at the source level: the buy call must be reachable only underneath a
-balance-mode check, and the skip must be recorded rather than swallowed.
-The failure this prevents (a REAL-balance order) is unrecoverable, so the
-guard's presence is worth asserting even coarsely.
-"""
+"""Keep one guarded buy path; fake-session behavior is in runner shutdown tests."""
 
 import ast
 from pathlib import Path
@@ -30,7 +23,7 @@ def _buy_call_nodes(tree):
 def test_runner_has_exactly_one_buy_path():
     tree = ast.parse(RUNNER.read_text(encoding="utf-8"))
     assert len(_buy_call_nodes(tree)) == 1, (
-        "more than one buy path means the PRACTICE guard can be bypassed")
+        "more than one buy path means the selected-balance guard can be bypassed")
 
 
 def test_every_buy_is_guarded_by_a_balance_mode_check():
@@ -39,7 +32,7 @@ def test_every_buy_is_guarded_by_a_balance_mode_check():
     buy = _buy_call_nodes(tree)[0]
 
     # Walk the enclosing statements: some ancestor `if` must test a value
-    # derived from get_balance_mode against "PRACTICE".
+    # derived from get_balance_mode against the selected mode.
     guarded = False
     for node in ast.walk(tree):
         if not isinstance(node, ast.If):
@@ -53,10 +46,3 @@ def test_every_buy_is_guarded_by_a_balance_mode_check():
     assert guarded, "the buy call is not underneath a balance-mode check"
     assert "get_balance_mode" in source
     assert "balance_mode_" in source, "a refused order must be recorded"
-
-
-def test_startup_practice_assertion_still_present():
-    # The per-order guard supplements the startup check; it does not replace
-    # it (a session that starts on REAL must never reach the loop).
-    source = RUNNER.read_text(encoding="utf-8")
-    assert 'refusing to run: balance mode is not PRACTICE' in source

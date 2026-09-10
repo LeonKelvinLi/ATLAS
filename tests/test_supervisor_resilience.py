@@ -11,6 +11,14 @@ import pytest
 import supervisor
 
 
+@pytest.fixture(autouse=True)
+def isolated_configuration(monkeypatch, tmp_path):
+    monkeypatch.setattr(supervisor, "load_env_file", lambda _path: None)
+    monkeypatch.setattr(supervisor, "LOGS_DIR", tmp_path / "logs")
+    monkeypatch.setattr(supervisor, "LOG", tmp_path / "logs")
+    monkeypatch.setenv("IQ_ALLOW_REAL", "0")
+
+
 class Clock:
     def __init__(self):
         self.now = 0.0
@@ -172,6 +180,10 @@ class Harness:
 
 @pytest.mark.parametrize("argv", [
     [], ["--collect-min", "10"], ["--mode", "real"],
+    ["--mode", "real", "--amount", "2"],
+    ["--mode", "paper", "--amount", "2"],
+    ["--mode", "practice", "--amount", "nan"],
+    ["--mode", "practice", "--amount", "0"],
     ["--paper", "--mode", "practice"],
     ["--mode", "paper", "--collect-min", "0"],
     ["--mode", "paper", "--collect-min", "-1"],
@@ -190,17 +202,115 @@ def test_invalid_or_missing_mode_has_no_side_effects(monkeypatch, tmp_path, argv
     assert not (tmp_path / "logs").exists()
 
 
-@pytest.mark.parametrize("argv,trade", [
-    (["--paper"], False), (["--mode", "paper"], False),
-    (["--mode", "practice"], True),
+@pytest.mark.parametrize("argv,expected_mode,amount", [
+    (["--paper"], "paper", None), (["--mode", "paper"], "paper", None),
+    (["--mode", "practice"], "practice", "1.0"),
+    (["--mode", "practice", "--amount", "2.5"], "practice", "2.5"),
+    (["--mode", "real", "--amount", "2.5"], "real", "2.5"),
 ])
-def test_only_explicit_practice_mode_enables_orders(monkeypatch, argv, trade):
+def test_explicit_mode_and_amount_reach_the_runner(monkeypatch, argv, expected_mode, amount):
+    monkeypatch.setenv("IQ_ALLOW_REAL", "1")
     harness = Harness(monkeypatch)
-    supervisor.main(argv)
+    assert supervisor.main(argv) == 0
     assert len(harness.commands) == 1
     command = harness.commands[0]
     assert command[1] == "live_h2_runner.py"
-    assert ("--trade" in command) is trade
+    assert command[command.index("--mode") + 1] == expected_mode
+    assert "--trade" not in command
+    if amount is None:
+        assert "--amount" not in command
+    else:
+        assert command[command.index("--amount") + 1] == amount
+    assert supervisor.LOG == (supervisor.LOGS_DIR / "real"
+                              if expected_mode == "real" else supervisor.LOGS_DIR)
+    harness.assert_released()
+
+
+@pytest.mark.parametrize("amount", [None, "0", "-1", "nan", "inf"])
+def test_real_amount_is_required_and_validated_before_operational_effects(
+        monkeypatch, amount):
+    monkeypatch.setenv("IQ_ALLOW_REAL", "1")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid real configuration reached an operational side effect")
+
+    monkeypatch.setattr(supervisor, "log", forbidden)
+    monkeypatch.setattr(supervisor, "acquire_singleton_lock", forbidden)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", forbidden)
+    argv = ["--mode", "real"] + (["--amount", amount] if amount is not None else [])
+    with pytest.raises(SystemExit) as exc:
+        supervisor.main(argv)
+    assert exc.value.code == 2
+    assert not supervisor.LOGS_DIR.exists()
+
+
+def test_real_pending_submission_blocks_start_without_touching_the_marker(monkeypatch):
+    monkeypatch.setenv("IQ_ALLOW_REAL", "1")
+    marker = supervisor.LOGS_DIR / "real" / "order_submission_pending.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"fixture": "unresolved"}')
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unresolved submission reached an operational side effect")
+
+    monkeypatch.setattr(supervisor, "log", forbidden)
+    monkeypatch.setattr(supervisor, "acquire_singleton_lock", forbidden)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", forbidden)
+    assert supervisor.main(["--mode", "real", "--amount", "2"]) == (
+        supervisor.REAL_ORDER_BLOCKED_EXIT)
+    assert marker.read_text() == '{"fixture": "unresolved"}'
+    assert list(marker.parent.iterdir()) == [marker]
+
+
+def test_real_blocked_runner_stops_supervisor_without_restart_or_new_collection(monkeypatch):
+    monkeypatch.setenv("IQ_ALLOW_REAL", "1")
+    harness = Harness(monkeypatch)
+
+    def blocked_runner(process):
+        process.returncode = supervisor.REAL_ORDER_BLOCKED_EXIT
+
+    harness.on_spawn = blocked_runner
+    harness.stop.on_wait = lambda _timeout: harness.clock.advance(60)
+    assert supervisor.main(["--mode", "real", "--amount", "2",
+                            "--collect-min", "1"]) == supervisor.REAL_ORDER_BLOCKED_EXIT
+    assert len(harness.commands) == len(harness.threads) == 1
+    assert any("without relaunch" in line for line in harness.logs)
+    assert not any("backing off" in line for line in harness.logs)
+    harness.assert_released()
+
+
+def test_supervisor_reads_selected_env_before_validating_real_mode(monkeypatch, tmp_path):
+    from runtime_paths import load_env_file
+
+    env_file = tmp_path / "selected.env"
+    env_file.write_text("IQ_ALLOW_REAL=1\n")
+    monkeypatch.delenv("IQ_ALLOW_REAL")
+    monkeypatch.setattr(supervisor, "ENV_FILE", env_file)
+    monkeypatch.setattr(supervisor, "load_env_file", load_env_file)
+    harness = Harness(monkeypatch)
+    assert supervisor.main(["--mode", "real", "--amount", "2"]) == 0
+    assert len(harness.commands) == 1
+    harness.assert_released()
+
+
+@pytest.mark.parametrize("exit_code", [1, -9])
+def test_crashed_real_runner_with_marker_is_not_restarted(monkeypatch, exit_code):
+    monkeypatch.setenv("IQ_ALLOW_REAL", "1")
+    harness = Harness(monkeypatch)
+    marker = supervisor.LOGS_DIR / "real" / "order_submission_pending.json"
+
+    def crashed_runner(process):
+        marker.parent.mkdir(parents=True)
+        marker.write_text('{"fixture": "inflight before crash"}')
+        process.returncode = exit_code
+
+    harness.on_spawn = crashed_runner
+    harness.stop.on_wait = lambda _timeout: harness.clock.advance(60)
+    assert supervisor.main(["--mode", "real", "--amount", "2",
+                            "--collect-min", "1"]) == supervisor.REAL_ORDER_BLOCKED_EXIT
+    assert len(harness.commands) == len(harness.threads) == 1
+    assert marker.read_text() == '{"fixture": "inflight before crash"}'
+    assert any("blocked after runner exit" in line for line in harness.logs)
     harness.assert_released()
 
 

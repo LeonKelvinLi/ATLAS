@@ -5,14 +5,20 @@ websocket library and exposes account, market-data and trading tools over MCP.
 
 Safety model:
   - Connects to the PRACTICE balance by default (IQ_DEFAULT_BALANCE).
-  - Any order-placing/closing tool refuses to act on the REAL balance unless
-    IQ_ALLOW_REAL=1 is set in the environment / .env file.
+  - Selecting REAL requires IQ_ALLOW_REAL=1 in the environment / .env file.
+  - Every order mutation verifies the selected PRACTICE/REAL balance.
+    Unknown or mismatched balances always refuse; reconnects retain selection.
+  - A timed-out worker blocks further account changes until it actually exits.
+    Timeout does not cancel a broker operation: reconcile unknown mutations
+    against broker history before retrying. This MCP guard is in-process only;
+    it does not provide the runner's persistent REAL submission recovery block.
 
 Credentials come from ATLAS_ENV_FILE, or .env in ATLAS_STATE_DIR when unset
 (see .env.example). The state directory defaults to this script's directory.
 """
 
 import difflib
+from functools import wraps
 import os
 import threading
 import time
@@ -34,10 +40,56 @@ _load_env()
 mcp = FastMCP("iqoption")
 
 _client: Any = None
+_selected_balance: str | None = None
+_account_lock = threading.RLock()
+_inflight_lock = threading.Lock()
+_timed_out_calls: set[threading.Event] = set()
 
 
 class IQError(Exception):
     pass
+
+
+def _account_operation(fn):
+    """Keep balance changes and guarded submissions on the shared client serial."""
+    @wraps(fn)
+    def locked(*args, **kwargs):
+        with _account_lock:
+            with _inflight_lock:
+                if _timed_out_calls:
+                    raise IQError(
+                        "A timed-out broker call is still in flight; connection, "
+                        "balance changes, and order mutations are blocked. Its "
+                        "outcome may be unknown; reconcile broker history before retrying."
+                    )
+            return fn(*args, **kwargs)
+    return locked
+
+
+def _validate_balance_selection(mode: str) -> str:
+    if not isinstance(mode, str) or mode.upper() not in ("PRACTICE", "REAL"):
+        raise IQError("mode must be PRACTICE or REAL")
+    mode = mode.upper()
+    if mode == "REAL" and os.environ.get("IQ_ALLOW_REAL") != "1":
+        raise IQError("REAL balance requires IQ_ALLOW_REAL=1; no balance was selected")
+    return mode
+
+
+def _expected_balance() -> str:
+    return _validate_balance_selection(
+        _selected_balance or os.environ.get("IQ_DEFAULT_BALANCE", "PRACTICE")
+    )
+
+
+def _verify_balance(client, expected: str) -> None:
+    try:
+        actual = _call(client.get_balance_mode)
+    except Exception as exc:
+        raise IQError("Unable to verify active balance; refusing account operation") from exc
+    if actual not in ("PRACTICE", "REAL"):
+        raise IQError("Unrecognized active balance; refusing account operation")
+    if actual != expected:
+        raise IQError(f"Expected {expected} balance, received {actual}; refusing account operation")
 
 
 def _call(fn, *args, timeout: float = CALL_TIMEOUT, **kwargs):
@@ -53,13 +105,23 @@ def _call(fn, *args, timeout: float = CALL_TIMEOUT, **kwargs):
         except Exception as exc:
             box["error"] = exc
         finally:
-            done.set()
+            with _inflight_lock:
+                done.set()
+                _timed_out_calls.discard(done)
 
     threading.Thread(target=runner, daemon=True).start()
     if not done.wait(timeout):
+        with _inflight_lock:
+            # Register and clear under the same lock: a worker completing at
+            # the timeout boundary must neither escape tracking nor leave a
+            # stale entry that blocks the client forever.
+            if not done.is_set():
+                _timed_out_calls.add(done)
         raise IQError(
-            f"IQ Option did not answer within {timeout}s. The connection may be "
-            "stale - run iq_connect to reconnect and try again."
+            f"IQ Option did not answer within {timeout}s. The call was not "
+            "cancelled and may still execute. Any account-changing outcome is "
+            "unknown; reconcile broker history before retrying. Further account "
+            "changes are blocked while the timed-out call remains in flight."
         )
     if "error" in box:
         raise box["error"]
@@ -82,7 +144,11 @@ def _get_client():
     return _client
 
 
-def _connect(sms_code: str | None = None) -> dict:
+@_account_operation
+def _connect(sms_code: str | None = None, *, balance_mode: str | None = None) -> dict:
+    global _selected_balance
+    expected = _expected_balance() if balance_mode is None else _validate_balance_selection(balance_mode)
+    _selected_balance = expected
     client = _get_client()
     check, reason = _call(client.connect, sms_code or None, timeout=90)
     if not check:
@@ -93,10 +159,8 @@ def _connect(sms_code: str | None = None) -> dict:
             )
         raise IQError(f"Login failed: {reason}")
 
-    default_mode = os.environ.get("IQ_DEFAULT_BALANCE", "PRACTICE").upper()
-    if default_mode == "REAL" and os.environ.get("IQ_ALLOW_REAL") != "1":
-        default_mode = "PRACTICE"
-    _call(client.change_balance, default_mode)
+    _call(client.change_balance, expected)
+    _verify_balance(client, expected)
     return _status_dict(client)
 
 
@@ -118,13 +182,8 @@ def _status_dict(client) -> dict:
 
 
 def _require_trading_allowed(client) -> None:
-    mode = _call(client.get_balance_mode)
-    if mode != "PRACTICE" and os.environ.get("IQ_ALLOW_REAL") != "1":
-        raise IQError(
-            f"Refusing to trade: the active balance is {mode} and real-money "
-            "trading is disabled. Set IQ_ALLOW_REAL=1 in .env to enable it, or "
-            "switch to PRACTICE with iq_switch_balance."
-        )
+    # Validate the REAL opt-in on every submission, including after reconnects.
+    _verify_balance(client, _expected_balance())
 
 
 def _resolve_asset(asset: str) -> str:
@@ -158,18 +217,24 @@ def iq_status() -> dict:
 
 
 @mcp.tool()
+@_account_operation
 def iq_switch_balance(mode: str) -> dict:
-    """Switch the active balance between PRACTICE and REAL. Switching to REAL is
-    allowed for viewing, but trading tools stay blocked unless IQ_ALLOW_REAL=1."""
-    mode = mode.upper()
-    if mode not in ("PRACTICE", "REAL"):
-        raise IQError("mode must be PRACTICE or REAL")
-    client = _ensure_connected()
+    """Select and verify PRACTICE or REAL; REAL requires IQ_ALLOW_REAL=1.
+    The requested selection is retained when the client reconnects. A failed
+    switch cannot silently leave orders enabled on the previous balance."""
+    global _selected_balance
+    mode = _validate_balance_selection(mode)
+    _selected_balance = mode
+    client = _get_client()
+    if not client.check_connect():
+        return _connect(balance_mode=mode)
     _call(client.change_balance, mode)
+    _verify_balance(client, mode)
     return _status_dict(client)
 
 
 @mcp.tool()
+@_account_operation
 def iq_reset_practice_balance() -> dict:
     """Reset the PRACTICE (demo) balance back to its default amount."""
     client = _ensure_connected()
@@ -286,6 +351,7 @@ def iq_positions(instrument_type: str = "cfd") -> list[dict]:
 
 
 @mcp.tool()
+@_account_operation
 def iq_place_binary(asset: str, direction: str, amount: float, duration_minutes: int = 1) -> dict:
     """Place a binary option trade. direction is 'call' (price up) or 'put'
     (price down); amount is the stake in account currency; duration_minutes is
@@ -318,6 +384,7 @@ def iq_binary_result(order_id: int, wait_seconds: int = 75) -> dict:
 
 
 @mcp.tool()
+@_account_operation
 def iq_place_order(
     instrument_type: str,
     instrument_id: str,
@@ -370,6 +437,7 @@ def iq_place_order(
 
 
 @mcp.tool()
+@_account_operation
 def iq_close_position(order_id: int) -> dict:
     """Close an open margin position by the order id returned from
     iq_place_order (for positions listed by iq_positions, use their 'id').
@@ -383,6 +451,7 @@ def iq_close_position(order_id: int) -> dict:
 
 
 @mcp.tool()
+@_account_operation
 def iq_cancel_order(order_id: int) -> dict:
     """Cancel a pending (not yet filled) margin order."""
     client = _ensure_connected()

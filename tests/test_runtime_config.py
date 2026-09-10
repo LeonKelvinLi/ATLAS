@@ -156,6 +156,7 @@ def test_selfcheck_uses_environment_credentials_without_exposing_them(tmp_path, 
     env_file = tmp_path / "fixture.env"
     env_file.write_text("IQ_ALLOW_REAL=1\nIQ_DEFAULT_BALANCE=REAL\n")
     monkeypatch.setattr(selfcheck, "ENV_FILE", env_file)
+    monkeypatch.setattr(selfcheck, "LOGS_DIR", tmp_path / "logs")
     monkeypatch.setenv("IQ_EMAIL", "fixture@example.invalid")
     monkeypatch.setenv("IQ_PASSWORD", "fixture-password")
     monkeypatch.setenv("IQ_ALLOW_REAL", "0")
@@ -174,12 +175,13 @@ def test_selfcheck_matches_first_duplicate_env_value(tmp_path, monkeypatch):
     env_file.write_text("IQ_ALLOW_REAL=1\nIQ_ALLOW_REAL=0\n"
                         "IQ_DEFAULT_BALANCE=REAL\nIQ_DEFAULT_BALANCE=PRACTICE\n")
     monkeypatch.setattr(selfcheck, "ENV_FILE", env_file)
+    monkeypatch.setattr(selfcheck, "LOGS_DIR", tmp_path / "logs")
     monkeypatch.delenv("IQ_ALLOW_REAL", raising=False)
     monkeypatch.delenv("IQ_DEFAULT_BALANCE", raising=False)
     report = selfcheck.Report()
-    selfcheck.check_safety(report)
-    failed = {check for level, check, _ in report.rows if level == "FAIL"}
-    assert {"safety IQ_ALLOW_REAL", "safety balance mode"} <= failed
+    selfcheck.check_safety(report, mode="real", amount=2)
+    successful = {check for level, check, _ in report.rows if level == "OK"}
+    assert {"safety IQ_ALLOW_REAL", "execution configuration"} <= successful
 
 
 def test_backup_preserves_uncheckpointed_wal_with_uri_characters(tmp_path):

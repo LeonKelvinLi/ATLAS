@@ -56,6 +56,8 @@ def test_main_exits_when_the_lock_is_held(monkeypatch, tmp_path):
     have been indistinguishable from this noise and waved off.
     """
     monkeypatch.setattr(supervisor, "LOG", tmp_path)
+    monkeypatch.setattr(supervisor, "LOGS_DIR", tmp_path)
+    monkeypatch.setattr(supervisor, "load_env_file", lambda _path: None)
     acquire = supervisor.acquire_singleton_lock
     held = acquire(0)
     assert held is not None

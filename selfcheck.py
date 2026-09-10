@@ -8,7 +8,7 @@ backup coverage. Read-only everywhere; it never touches trading state.
 
 Exit code: 0 all clear, 1 warnings, 2 failures.
 
-Usage: .venv\\Scripts\\python.exe selfcheck.py [--json]
+Usage: python selfcheck.py [--json] [--mode paper|practice|real] [--amount N]
 """
 
 import argparse
@@ -23,7 +23,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from runtime_paths import BACKUP_DIR, ENV_FILE, MODELS_DIR, PROJECT_DIR, STATE_DIR
+from execution_mode import resolve_execution
+from runtime_paths import BACKUP_DIR, ENV_FILE, LOGS_DIR, MODELS_DIR, PROJECT_DIR, STATE_DIR
 TASKS = ["ATLAS-supervisor", "ATLAS-watchdog", "ATLAS-extra-collect",
          "ATLAS-catchup", "ATLAS-backup"]
 # Suppress the console window Windows would create for each console child
@@ -93,7 +94,7 @@ def check_disk(rep: Report) -> None:
         "disk space", f"{free_gb:.1f} GB free")
 
 
-def check_safety(rep: Report) -> None:
+def check_safety(rep: Report, mode: str = "paper", amount=None) -> None:
     # Match runtime precedence: process environment overrides the selected
     # .env file. Report presence/status only, never credential values.
     values = {}
@@ -108,14 +109,20 @@ def check_safety(rep: Report) -> None:
         rep.fail("broker credentials", "IQ_EMAIL and IQ_PASSWORD are required")
     else:
         rep.ok("broker credentials", "present (values not displayed)")
-    if values.get("IQ_ALLOW_REAL", "0") != "0":
-        rep.fail("safety IQ_ALLOW_REAL", "must be 0")
+    try:
+        execution = resolve_execution(mode, amount, environ=values)
+        execution.assert_ready(LOGS_DIR, environ=values)
+    except ValueError as exc:
+        rep.fail("execution configuration", str(exc))
     else:
-        rep.ok("safety IQ_ALLOW_REAL", "0 (real balance refused)")
-    if values.get("IQ_DEFAULT_BALANCE", "PRACTICE").upper() != "PRACTICE":
-        rep.fail("safety balance mode", "must be PRACTICE")
-    else:
-        rep.ok("safety balance mode", "PRACTICE")
+        rep.ok("execution configuration", f"mode={execution.mode}; "
+               f"expected balance={execution.balance_mode}; "
+               f"orders={'enabled' if execution.orders_enabled else 'disabled'}")
+        if execution.orders_enabled:
+            rep.ok("order amount", f"{execution.amount:g} account-currency units")
+        if mode == "real":
+            rep.ok("safety IQ_ALLOW_REAL", "explicit real opt-in configured")
+            rep.ok("submission reconciliation", "no pending REAL submission marker")
     # The per-order guard must still be in the runner.
     runner = (PROJECT_DIR / "live_h2_runner.py").read_text(encoding="utf-8")
     if "get_balance_mode" in runner and "balance_mode_" in runner:
@@ -203,23 +210,24 @@ def check_database(rep: Report) -> None:
             "payout snapshots", f"{ns:,}, newest {age_h:.1f} h old")
 
 
-def check_backup(rep: Report) -> None:
+def check_backup(rep: Report, mode: str = "paper") -> None:
     if BACKUP_DIR is None:
         rep.warn("backup", "ATLAS_BACKUP_DIR is not configured")
         return
     if not BACKUP_DIR.exists():
         rep.warn("backup", f"{BACKUP_DIR} does not exist yet")
         return
-    files = list(BACKUP_DIR.glob("*"))
+    files = [path for path in BACKUP_DIR.rglob("*") if path.is_file()]
     if not files:
         rep.warn("backup", "directory is empty")
         return
     newest = max(f.stat().st_mtime for f in files)
     age_h = (time.time() - newest) / 3600
     total_mb = sum(f.stat().st_size for f in files) / 1024 ** 2
-    critical = BACKUP_DIR / "logs_live_h2.jsonl"
+    critical_name = "logs/real/live_h2.jsonl" if mode == "real" else "logs_live_h2.jsonl"
+    critical = BACKUP_DIR / critical_name
     if not critical.exists():
-        rep.fail("backup", "logs_live_h2.jsonl (the forward evidence) NOT backed up")
+        rep.fail("backup", f"{critical_name} ({mode} records) NOT backed up")
     elif age_h > BACKUP_MAX_AGE_H:
         rep.warn("backup", f"{len(files)} files, newest {age_h:.1f} h old")
     else:
@@ -333,17 +341,26 @@ def check_tests(rep: Report) -> None:
     (rep.ok if out.returncode == 0 else rep.fail)("tests", summary[:90])
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--skip-tests", action="store_true")
-    args = ap.parse_args()
+    ap.add_argument("--mode", choices=("paper", "practice", "real"), default="paper",
+                    help="execution configuration to inspect; never starts the runner")
+    ap.add_argument("--amount", type=float,
+                    help="configured stake in account currency; required for real mode")
+    args = ap.parse_args(argv)
 
     rep = Report()
     for fn in (check_tasks, check_disk, check_safety, check_secrets,
                check_models, check_database, check_backup, check_git):
         try:
-            fn(rep)
+            if fn is check_safety:
+                fn(rep, args.mode, args.amount)
+            elif fn is check_backup:
+                fn(rep, args.mode)
+            else:
+                fn(rep)
         except Exception as exc:
             rep.warn(fn.__name__, f"check crashed: {type(exc).__name__}: {exc}")
     if not args.skip_tests:
@@ -355,6 +372,7 @@ def main() -> int:
     if args.json:
         print(json.dumps({
             "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "mode": args.mode,
             "exit_code": rep.exit_code,
             "rows": [{"level": lv, "check": c, "detail": d} for lv, c, d in rep.rows],
         }, indent=2))

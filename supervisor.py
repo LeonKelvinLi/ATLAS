@@ -1,7 +1,10 @@
-"""Portable supervisor for explicitly selected paper or practice operation.
+"""Portable supervisor for explicitly selected paper, practice or real operation.
 
 Run with ``--mode paper`` to collect candles and log signals, or explicitly
 select ``--mode practice`` to let the runner place demo-account orders.
+``--mode real`` requires IQ_ALLOW_REAL=1 and an explicit positive --amount
+in account currency. No account or application is started by importing this
+module. Real records are isolated beneath logs/real.
 ``--paper`` remains an alias for ``--mode paper``. No mode is selected by
 default. Choosing a mode does not validate model artifacts or authorize a
 second host to use an account already running elsewhere.
@@ -20,7 +23,8 @@ import time
 from datetime import datetime, timezone
 
 from instruments import INSTRUMENTS
-from runtime_paths import LOGS_DIR, PROJECT_DIR
+from execution_mode import PendingSubmissionError, REAL_ORDER_BLOCKED_EXIT, resolve_execution
+from runtime_paths import ENV_FILE, LOGS_DIR, PROJECT_DIR, load_env_file
 
 PYTHON = sys.executable
 LOG = LOGS_DIR
@@ -226,23 +230,36 @@ def _positive_minutes(value: str) -> int:
     return minutes
 
 
-def main(argv=None) -> None:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     mode = ap.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--mode", choices=("paper", "practice"),
-                      help="paper logs signals; practice enables demo orders")
+    mode.add_argument("--mode", choices=("paper", "practice", "real"),
+                      help="paper logs signals; practice/real select the order balance")
     mode.add_argument("--paper", dest="mode", action="store_const", const="paper",
                       help="alias for --mode paper")
     ap.add_argument("--collect-min", type=_positive_minutes, default=60)
+    ap.add_argument("--amount", type=float,
+                    help="stake in account currency; required for real mode")
     args = ap.parse_args(argv)
 
-    # Parse before even acquiring the lock or writing a log. An unconfigured
-    # service must fail visibly instead of silently selecting demo trading.
-    global _LOCK_SOCK
+    # Validate before acquiring locks, creating logs or launching children.
+    # Loading the selected configuration does not connect to the broker.
+    load_env_file(ENV_FILE)
+    try:
+        execution = resolve_execution(args.mode, args.amount)
+        execution.assert_ready(LOGS_DIR)
+    except PendingSubmissionError as exc:
+        print(f"execution blocked: {exc}", file=sys.stderr)
+        return REAL_ORDER_BLOCKED_EXIT
+    except ValueError as exc:
+        ap.error(str(exc))
+
+    global _LOCK_SOCK, LOG
+    LOG = execution.log_dir(LOGS_DIR)
     _LOCK_SOCK = acquire_singleton_lock()
     if _LOCK_SOCK is None:
         log("another supervisor already holds the lock - exiting cleanly")
-        return
+        return 0
 
     stop = threading.Event()
     children = ChildProcesses(stop)
@@ -259,17 +276,33 @@ def main(argv=None) -> None:
             signal.signal(signum, request_stop)
 
         log(f"supervisor start (python={PYTHON}, mode={args.mode}, "
-            f"trade={'on' if args.mode == 'practice' else 'off'})")
+            f"trade={'on' if execution.orders_enabled else 'off'}, "
+            f"amount={execution.amount}, balance={execution.balance_mode})")
         last_collect = None
         runner = None
-        runner_cmd = [PYTHON, "live_h2_runner.py", "--minutes", "57"]
-        if args.mode == "practice":
-            runner_cmd.append("--trade")
+        runner_cmd = [PYTHON, "live_h2_runner.py", "--minutes", "57",
+                      "--mode", execution.mode]
+        if execution.orders_enabled:
+            runner_cmd.extend(["--amount", str(execution.amount)])
         backoff = BACKOFF_START_S
         launched_at = 0.0
 
         while not stop.is_set():
             now = time.monotonic()
+            # A blocked real submission must not become another runner (or
+            # a new collector cycle) through automatic restart/backoff.
+            if runner is not None and runner.poll() == REAL_ORDER_BLOCKED_EXIT:
+                log("runner requires broker-history reconciliation; "
+                    "supervisor stopping without relaunch")
+                return REAL_ORDER_BLOCKED_EXIT
+            if runner is not None and runner.poll() is not None:
+                # A crash/kill may leave the durable marker without returning
+                # the dedicated blocked status. Check before new collection.
+                try:
+                    execution.assert_ready(LOGS_DIR)
+                except ValueError as exc:
+                    log(f"execution blocked after runner exit: {exc}")
+                    return REAL_ORDER_BLOCKED_EXIT
             if last_collect is None or now - last_collect >= args.collect_min * 60:
                 if ((collector_thread is not None and collector_thread.is_alive())
                         or children.has_running("collector")):
@@ -295,6 +328,11 @@ def main(argv=None) -> None:
                         backoff = min(backoff * 2, BACKOFF_MAX_S)
                     else:
                         backoff = BACKOFF_START_S
+                try:
+                    execution.assert_ready(LOGS_DIR)
+                except ValueError as exc:
+                    log(f"execution blocked before runner launch: {exc}")
+                    return REAL_ORDER_BLOCKED_EXIT
                 runner = children.spawn(runner_cmd)
                 if runner is not None:
                     launched_at = time.monotonic()
@@ -318,7 +356,8 @@ def main(argv=None) -> None:
             _LOCK_SOCK = None
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -6,10 +6,11 @@ bar, apply the frozen H2 model (models/h2-*.pkl, newest), gate by expected
 value against the LIVE binary payout, and append one JSON line per signal
 to logs/live_h2.jsonl.
 
---trade places a $1 PRACTICE 15-minute binary per signal (hard PRACTICE
-guard, execution refused otherwise). Default is paper: nothing is placed;
-outcomes are scored later against collected candles. Run bounded with
---minutes; schedule externally for longer sessions.
+--mode practice (legacy --trade) places 15-minute practice binaries.
+--mode real requires IQ_ALLOW_REAL=1 and an explicit --amount in account
+currency. The selected balance is checked at startup and before every buy.
+Default is paper. REAL records go to logs/real, outside frozen research
+evidence. Run bounded with --minutes; schedule externally on the server.
 """
 
 import argparse
@@ -20,12 +21,15 @@ import signal
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
 
 from features import build_features
+from execution_mode import (PENDING_ORDER_FILE, REAL_ORDER_BLOCKED_EXIT,
+                            PendingSubmissionError, resolve_execution)
 from instruments import INSTRUMENTS
 from research_pooled import currencies
 from runtime_paths import ENV_FILE, LOGS_DIR, MODELS_DIR, load_env_file
@@ -43,7 +47,6 @@ REGISTERED_CUTOFF_TS = 1784678400  # 2026-07-22T00:00:00Z, FORWARD_TEST.md
 CYCLE_DEADLINE_S = 300
 _LAST_PROGRESS = 0.0  # epoch of the last completed cycle step
 EXPIRY_MINUTES = 15
-TRADE_AMOUNT = 1.0
 _LOCK_SOCK = None  # single-instance lock socket, bound in main()
 SHUTDOWN_BUY_GRACE_S = 5.0
 SHUTDOWN_RECONCILE_S = 8.0  # total budget, never per outstanding order
@@ -154,6 +157,57 @@ def _start_cycle_watchdog(deadline_s: int = CYCLE_DEADLINE_S,
 
 def _load_env() -> None:
     load_env_file(ENV_FILE)
+
+
+def _real_account(client, stop_event):
+    """Pin a readable account identity and currency, without assuming USD."""
+    balance_id = _call(client.get_balance_id, timeout=30, stop_event=stop_event)
+    currency = _call(client.get_currency, timeout=30, stop_event=stop_event)
+    valid_id = ((isinstance(balance_id, int) and not isinstance(balance_id, bool)
+                 and balance_id > 0)
+                or (isinstance(balance_id, str) and bool(balance_id.strip())))
+    if (not valid_id
+            or not isinstance(currency, str) or not currency.strip()):
+        raise ValueError("REAL balance identity or currency is unreadable")
+    return {"balance_id": balance_id, "currency": currency}
+
+
+def _sync_directory(path):
+    """Persist directory entries for crash recovery on the server filesystem."""
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _mark_submission(log_path, record):
+    """Write before the broker call; never overwrite a prior unknown order."""
+    marker = log_path.with_name(PENDING_ORDER_FILE)
+    with marker.open("x", encoding="utf-8") as fh:
+        json.dump({**record, "submission_status": "pending_acknowledgement"}, fh)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    _sync_directory(marker.parent)
+    return marker
+
+
+def _prepare_log_directory(path, *, durable=False):
+    missing = []
+    directory = path
+    while not directory.exists():
+        missing.append(directory)
+        directory = directory.parent
+    path.mkdir(parents=True, exist_ok=True)
+    if durable:
+        for directory in reversed(missing):
+            _sync_directory(directory.parent)
+
+
+def _clear_submission(marker):
+    marker.unlink()
+    _sync_directory(marker.parent)
 
 
 def settle_open_orders(client, open_orders, log_path,
@@ -372,6 +426,7 @@ def live_quotes(client, stop_event=None) -> dict:
 
 def _run(args, client, stop_event, watchdog_stop_event, open_orders, log_path) -> int:
     _check_shutdown(stop_event)
+    execution = args.execution
     model_name, model, meta = load_frozen_model()
     meta_bundle = load_meta_filter()
     h4_bundle = load_shadow_h4()
@@ -405,11 +460,17 @@ def _run(args, client, stop_event, watchdog_stop_event, open_orders, log_path) -
     ok, reason = _call(client.connect, timeout=90, stop_event=stop_event)
     if not ok:
         raise SystemExit(f"login failed: {reason}")
-    _call(client.change_balance, "PRACTICE", stop_event=stop_event)
-    if _call(client.get_balance_mode, stop_event=stop_event) != "PRACTICE":
-        raise SystemExit("refusing to run: balance mode is not PRACTICE")
+    _call(client.change_balance, execution.balance_mode, stop_event=stop_event)
+    if _call(client.get_balance_mode, stop_event=stop_event) != execution.balance_mode:
+        raise SystemExit(f"refusing to run: balance mode is not {execution.balance_mode}")
+    account = _real_account(client, stop_event) if execution.mode == "real" else {}
+    attribution = {"execution_mode": execution.mode,
+                   "balance_mode": execution.balance_mode, **account}
+    print(f"execution={execution.mode} balance={execution.balance_mode} "
+          f"amount={execution.amount} currency={account.get('currency', 'account currency')}",
+          flush=True)
 
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    _prepare_log_directory(log_path.parent, durable=execution.mode == "real")
     deadline = time.time() + args.minutes * 60
     consecutive_failures = 0
 
@@ -433,7 +494,7 @@ def _run(args, client, stop_event, watchdog_stop_event, open_orders, log_path) -
                 # old code skipped both the heartbeat and the failure
                 # counter, defeating the relaunch design (audit live-H1).
                 with open(log_path.with_name("live_h2_heartbeat.jsonl"), "a") as fh:
-                    fh.write(json.dumps({"ts": int(time.time()), "assets": 0,
+                    fh.write(json.dumps({**attribution, "ts": int(time.time()), "assets": 0,
                                          "max_conf": None, "signals": 0}) + "\n")
                 consecutive_failures += 1
                 if consecutive_failures >= 5:
@@ -470,6 +531,7 @@ def _run(args, client, stop_event, watchdog_stop_event, open_orders, log_path) -
                     except Exception:
                         pass  # shadow track must never break the primary
                 record = {
+                    **attribution,
                     "ts": int(time.time()),  # true wall-clock at decision (audit M4)
                     "bar_to_ts": int(row["to_ts"]),
                     "asset": asset,
@@ -479,58 +541,76 @@ def _run(args, client, stop_event, watchdog_stop_event, open_orders, log_path) -
                     "payout": float(payout),
                     "ev_margin": EV_MARGIN,
                     "model": model_name,
-                    "mode": "trade" if args.trade else "paper",
+                    "mode": ("real" if execution.mode == "real" else
+                             "trade" if execution.orders_enabled else "paper"),
+                    "amount": execution.amount,
                     # shadow + execution attribution
                     "h4_p": round(h4_p, 6) if h4_p is not None else None,
                     "decision_latency_s": int(time.time()) - int(row["to_ts"]),
                 }
                 submission_failed = False
+                marker = None
                 # OTC EXCLUSION (2026-07-24, research_otc.py): pre-cutoff
                 # broker data shows OTC at 47.1% independent win rate -
                 # below break-even and below coin flip, while spot runs
                 # 65.5%. The broker synthesises OTC prices, and they resist
-                # the model. Demo orders are placed on spot only; paper
+                # the model. Orders are placed on spot only; paper
                 # logging (and the frozen hypothesis evaluation) is
                 # untouched and still covers every instrument.
-                if args.trade and asset.endswith("-OTC"):
+                if execution.orders_enabled and asset.endswith("-OTC"):
                     record["trade_skipped"] = "otc_below_breakeven"
-                elif args.trade:
-                    # PER-ORDER PRACTICE GUARD (2026-07-24). The startup check
-                    # asserts the balance mode once for a session that then
-                    # runs 57 minutes; the mode can change server-side. An
-                    # "Insufficient funds" rejection - impossible against the
-                    # $10k demo balance, and matching the 0.86 BRL REAL one -
-                    # showed real money was protected by luck, not by design.
-                    # Refuse rather than switch: skipping a trade costs one
-                    # data point, a real order costs real money.
+                elif execution.orders_enabled:
+                    # Reconnects can change the selected balance. Verify it
+                    # again per buy and never silently switch or fall back.
+                    account_error = None
                     try:
+                        if execution.mode == "real":
+                            execution.assert_ready(LOGS_DIR)
+                            if _real_account(client, stop_event) != account:
+                                raise ValueError("REAL account identity or currency changed")
                         mode = _call(client.get_balance_mode, timeout=30,
                                      stop_event=stop_event)
                     except ShutdownRequested:
                         raise
                     except Exception as exc:
                         mode = f"unreadable:{type(exc).__name__}"
-                    if mode != "PRACTICE":
+                        account_error = str(exc)
+                    record["observed_balance_mode"] = mode
+                    if mode != execution.balance_mode:
                         record["trade_skipped"] = f"balance_mode_{mode}"
+                        if account_error:
+                            record["account_error"] = account_error
                         print(f"REFUSING ORDER {asset}: balance mode is "
-                              f"{mode!r}, not PRACTICE",
+                              f"{mode!r}, expected {execution.balance_mode}",
                               file=sys.stderr, flush=True)
                     else:
+                        if execution.mode == "real":
+                            _check_shutdown(stop_event)
+                            record["submission_id"] = uuid.uuid4().hex
+                            marker = _mark_submission(log_path, record)
                         try:
                             ok, order_id = _call(
-                                client.buy, TRADE_AMOUNT, spec.order_active,
+                                client.buy, execution.amount, spec.order_active,
                                 "call" if action == "binary_call" else "put",
                                 EXPIRY_MINUTES, timeout=60, stop_event=stop_event,
                                 shutdown_grace=SHUTDOWN_BUY_GRACE_S,
                             )
-                        except (ShutdownRequested, TimeoutError) as exc:
+                            if not isinstance(ok, bool) or (
+                                ok and (isinstance(order_id, bool)
+                                        or not isinstance(order_id, (str, int))
+                                        or not order_id)
+                            ):
+                                raise ValueError("invalid broker acknowledgement")
+                        except Exception as exc:
                             record["order_id"] = None
-                            submission_failed = isinstance(exc, TimeoutError)
+                            submission_failed = not isinstance(exc, ShutdownRequested)
                             if submission_failed or exc.call_started:
                                 record["order_submission_unknown"] = True
                                 record["order_error"] = (
-                                    "acknowledgement_timeout" if submission_failed
-                                    else "shutdown_before_acknowledgement"
+                                    "shutdown_before_acknowledgement"
+                                    if isinstance(exc, ShutdownRequested) else
+                                    "acknowledgement_timeout" if isinstance(exc, TimeoutError)
+                                    else f"acknowledgement_error:{type(exc).__name__}"
                                 )
                                 print(f"WARN {asset}: order acknowledgement absent; "
                                       "submission status UNKNOWN. Inspect broker history "
@@ -549,14 +629,22 @@ def _run(args, client, stop_event, watchdog_stop_event, open_orders, log_path) -
                     if "order_id" in record:
                         fh.flush()
                         os.fsync(fh.fileno())
+                if marker is not None and not record.get("order_submission_unknown"):
+                    # Clear only after the acknowledgement or proven
+                    # not-started outcome is durable. Crashes leave a block.
+                    # Persist a newly created log's name before unlinking
+                    # the marker; a file fsync alone does not persist it.
+                    _sync_directory(log_path.parent)
+                    _clear_submission(marker)
                 print(json.dumps(record), flush=True)
                 fired += 1
-                if submission_failed:
+                if submission_failed or (execution.mode == "real"
+                                         and record.get("order_submission_unknown")):
                     # The normal call deadline may win the race with a
                     # shutdown signal. Preserve the unknown submission in
                     # either case, then end this session without more buys.
                     stop_event.set()
-                    return 1
+                    return REAL_ORDER_BLOCKED_EXIT if execution.mode == "real" else 1
             _check_shutdown(stop_event)
             # FULL CROSS-SECTION (2026-07-26). Only signals clearing the
             # frozen EV gate reach live_h2.jsonl, so no lower gate, wider
@@ -570,6 +658,7 @@ def _run(args, client, stop_event, watchdog_stop_event, open_orders, log_path) -
             # Separate file: live_h2.jsonl is a verdict input and is untouched.
             try:
                 cross = {
+                    **attribution,
                     "ts": cycle_ts,
                     "model": model_name,
                     "rows": [],
@@ -598,6 +687,7 @@ def _run(args, client, stop_event, watchdog_stop_event, open_orders, log_path) -
             # signal log, so record that the model really did evaluate.
             with open(log_path.with_name("live_h2_heartbeat.jsonl"), "a") as fh:
                 fh.write(json.dumps({
+                    **attribution,
                     "ts": cycle_ts,
                     "assets": len(frame),
                     "max_conf": round(float(np.max(np.abs(p_up - 0.5))), 4),
@@ -608,6 +698,9 @@ def _run(args, client, stop_event, watchdog_stop_event, open_orders, log_path) -
             raise
         except Exception as exc:
             print(f"WARN cycle: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            if execution.mode == "real" and os.path.lexists(execution.pending_path(LOGS_DIR)):
+                stop_event.set()
+                return REAL_ORDER_BLOCKED_EXIT
             consecutive_failures += 1
             # A dead websocket/network wastes the whole slot erroring; bail
             # nonzero so launchd (KeepAlive SuccessfulExit=false) relaunches
@@ -623,11 +716,24 @@ def _run(args, client, stop_event, watchdog_stop_event, open_orders, log_path) -
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--minutes", type=int, default=60, help="how long to run")
-    parser.add_argument("--trade", action="store_true",
-                        help="place $1 PRACTICE binaries (default: paper log only)")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--mode", choices=("paper", "practice", "real"), default="paper")
+    modes.add_argument("--trade", action="store_const", const="practice", dest="mode",
+                       help="legacy alias for --mode practice")
+    parser.add_argument("--amount", type=float,
+                        help="stake in account currency; required explicitly for real mode")
     args = parser.parse_args()
     if args.minutes <= 0:
         parser.error("--minutes must be positive")
+    _load_env()
+    try:
+        args.execution = resolve_execution(args.mode, args.amount)
+        args.execution.assert_ready(LOGS_DIR)
+    except PendingSubmissionError as exc:
+        print(f"refusing to run: {exc}", file=sys.stderr, flush=True)
+        return REAL_ORDER_BLOCKED_EXIT
+    except ValueError as exc:
+        parser.error(str(exc))
 
     import socket
 
@@ -637,9 +743,8 @@ def main() -> int:
     previous_handlers = _install_signal_handlers(stop_event, watchdog_stop_event)
     client = None
     open_orders = []
-    log_path = LOGS_DIR / "live_h2.jsonl"
+    log_path = args.execution.log_dir(LOGS_DIR) / "live_h2.jsonl"
     try:
-        _load_env()
         _check_shutdown(stop_event)
         # This lock coordinates processes on one host only. Account handover
         # across servers needs an explicit single active host.

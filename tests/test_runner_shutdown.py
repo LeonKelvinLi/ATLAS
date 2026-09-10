@@ -179,6 +179,8 @@ def session(monkeypatch, tmp_path):
         decisions=0, balance_calls=0, bind_error=False, on_balance=lambda: None,
         on_buy=lambda: (True, 42), on_predict=lambda: None,
         on_connect=lambda: (True, None),
+        selected_mode="PRACTICE", reported_mode=None, balance_id=123,
+        currency="USD", connect_calls=0,
         watchdog_event=watchdog_event,
     )
 
@@ -198,16 +200,23 @@ def session(monkeypatch, tmp_path):
 
     class FakeClient:
         def connect(self):
+            state.connect_calls += 1
             return state.on_connect()
 
         def change_balance(self, mode):
-            assert mode == "PRACTICE"
+            state.selected_mode = mode
 
         def get_balance_mode(self):
             state.balance_calls += 1
             if state.balance_calls > 1:
                 state.on_balance()
-            return "PRACTICE"
+            return state.reported_mode if state.reported_mode is not None else state.selected_mode
+
+        def get_balance_id(self):
+            return state.balance_id
+
+        def get_currency(self):
+            return state.currency
 
         def buy(self, amount, asset, action, expiry):
             state.buys.append((amount, asset, action, expiry))
@@ -409,3 +418,191 @@ def test_broker_api_disconnect_is_bounded(monkeypatch):
     monkeypatch.setattr(r, "_call", lambda fn, **kwargs: calls.append((fn, kwargs)))
     r._close_client(client)
     assert calls == [(close, {"timeout": r.SHUTDOWN_CLOSE_S})]
+
+
+def select_real(session, monkeypatch):
+    monkeypatch.setenv("IQ_ALLOW_REAL", "1")
+    monkeypatch.setattr(sys, "argv", ["live_h2_runner.py", "--mode", "real",
+                                     "--minutes", "1", "--amount", "2.5"])
+    session.log = r.LOGS_DIR / "real" / "live_h2.jsonl"
+    session.marker = session.log.with_name(r.PENDING_ORDER_FILE)
+    session.event.on_wait = lambda: session.event.set() if session.feature_calls else None
+
+
+@pytest.mark.parametrize("requested,observed", [("practice", "REAL"),
+                                                ("real", "PRACTICE"),
+                                                ("real", "UNKNOWN")])
+def test_wrong_startup_balance_never_reaches_decisions(session, monkeypatch, requested, observed):
+    if requested == "real":
+        select_real(session, monkeypatch)
+    session.reported_mode = observed
+    with pytest.raises(SystemExit, match=f"balance mode is not {requested.upper()}"):
+        r.main()
+    assert session.buys == []
+    assert session.feature_calls == 0
+    assert_cleaned(session)
+
+
+def test_real_buy_uses_explicit_stake_and_durable_pre_submission_record(session, monkeypatch):
+    select_real(session, monkeypatch)
+    session.currency = "BRL"
+
+    def acknowledge():
+        marker = json.loads(session.marker.read_text())
+        assert marker["amount"] == 2.5
+        assert marker["balance_mode"] == "REAL"
+        assert marker["balance_id"] == 123
+        assert marker["currency"] == "BRL"
+        session.event.set()
+        return True, 42
+
+    session.on_buy = acknowledge
+    assert r.main() == 0
+    assert session.selected_mode == "REAL"
+    assert session.buys == [(2.5, r.INSTRUMENTS["EURUSD"].order_active, "call", 15)]
+    record = json.loads(session.log.read_text())
+    assert record["mode"] == record["execution_mode"] == "real"
+    assert record["observed_balance_mode"] == "REAL"
+    assert record["amount"] == 2.5
+    assert not session.marker.exists()
+    assert not (r.LOGS_DIR / "live_h2.jsonl").exists()
+    assert_cleaned(session)
+
+
+@pytest.mark.parametrize("change", ["balance", "identity", "currency", "opt_in"])
+def test_real_account_drift_blocks_each_buy(session, monkeypatch, change):
+    select_real(session, monkeypatch)
+
+    def drift():
+        if change == "balance":
+            session.reported_mode = "PRACTICE"
+        elif change == "identity":
+            session.balance_id = 456
+        elif change == "currency":
+            session.currency = "BRL"
+        else:
+            monkeypatch.setenv("IQ_ALLOW_REAL", "0")
+
+    session.on_predict = drift
+    assert r.main() == 0
+    assert session.buys == []
+    records = [json.loads(line) for line in session.log.read_text().splitlines()]
+    assert len(records) == 2
+    assert all("trade_skipped" in row for row in records)
+    assert not session.marker.exists()
+    heartbeat = json.loads(session.log.with_name("live_h2_heartbeat.jsonl").read_text())
+    cross = json.loads(session.log.with_name("cross_section.jsonl").read_text())
+    assert heartbeat["execution_mode"] == cross["execution_mode"] == "real"
+
+
+@pytest.mark.parametrize("failure", ["timeout", "exception", "shutdown", "bad_ack"])
+def test_unknown_real_submission_blocks_further_buys_and_restart(session, monkeypatch, failure):
+    select_real(session, monkeypatch)
+
+    def unknown():
+        assert session.marker.exists()
+        if failure == "timeout":
+            raise TimeoutError("fixture")
+        if failure == "exception":
+            raise RuntimeError("fixture")
+        if failure == "shutdown":
+            session.event.set()
+            raise r.ShutdownRequested(call_started=True)
+        return True, None
+
+    session.on_buy = unknown
+    assert r.main() == r.REAL_ORDER_BLOCKED_EXIT
+    assert len(session.buys) == 1
+    assert session.marker.exists()
+    assert json.loads(session.log.read_text())["order_submission_unknown"] is True
+    assert_cleaned(session)
+    # Startup is rejected before a second signal handler, socket or broker.
+    assert r.main() == r.REAL_ORDER_BLOCKED_EXIT
+    assert session.connect_calls == 1
+
+
+def test_real_refusal_clears_marker_only_after_durable_record(session, monkeypatch):
+    select_real(session, monkeypatch)
+
+    def refuse():
+        session.event.set()
+        return False, "fixture rejection"
+
+    session.on_buy = refuse
+    assert r.main() == 0
+    record = json.loads(session.log.read_text())
+    assert record["order_id"] is None
+    assert record["order_error"] == "fixture rejection"
+    assert not record.get("order_submission_unknown")
+    assert not session.marker.exists()
+
+
+def test_real_log_failure_keeps_crash_recovery_marker(session, monkeypatch):
+    select_real(session, monkeypatch)
+
+    def acknowledge_but_break_log():
+        # A directory at the log path simulates an unavailable append target.
+        session.log.mkdir()
+        return True, 42
+
+    session.on_buy = acknowledge_but_break_log
+    assert r.main() == r.REAL_ORDER_BLOCKED_EXIT
+    assert len(session.buys) == 1
+    assert session.marker.exists()
+
+
+def test_real_submission_requires_durable_marker_before_buy(session, monkeypatch):
+    select_real(session, monkeypatch)
+    session.log.parent.mkdir(parents=True)
+
+    def unavailable_fsync(_fd):
+        raise OSError("fixture disk failure")
+
+    monkeypatch.setattr(r.os, "fsync", unavailable_fsync)
+    assert r.main() == r.REAL_ORDER_BLOCKED_EXIT
+    assert session.buys == []
+    assert session.marker.exists()
+
+
+@pytest.mark.parametrize("field,value", [("balance_id", None), ("balance_id", True),
+                                         ("balance_id", -1), ("balance_id", "  "),
+                                         ("currency", None), ("currency", "")])
+def test_real_requires_readable_account_identity(session, monkeypatch, field, value):
+    select_real(session, monkeypatch)
+    setattr(session, field, value)
+    with pytest.raises(ValueError, match="identity or currency"):
+        r.main()
+    assert session.buys == []
+    assert session.feature_calls == 0
+    assert_cleaned(session)
+
+
+def test_acknowledgement_log_directory_must_be_durable_before_marker_removal(session, monkeypatch):
+    select_real(session, monkeypatch)
+    real_sync = r._sync_directory
+
+    def fail_after_acknowledgement(path):
+        if session.log.is_file():
+            raise OSError("fixture directory fsync failure")
+        real_sync(path)
+
+    monkeypatch.setattr(r, "_sync_directory", fail_after_acknowledgement)
+    assert r.main() == r.REAL_ORDER_BLOCKED_EXIT
+    assert len(session.buys) == 1
+    assert json.loads(session.log.read_text())["order_id"] == 42
+    assert session.marker.exists()
+
+
+@pytest.mark.parametrize("missing", ["amount", "opt_in"])
+def test_invalid_real_configuration_has_no_runtime_effects(session, monkeypatch, missing):
+    select_real(session, monkeypatch)
+    if missing == "amount":
+        monkeypatch.setattr(sys, "argv", ["live_h2_runner.py", "--mode", "real"])
+    else:
+        monkeypatch.delenv("IQ_ALLOW_REAL")
+    with pytest.raises(SystemExit) as exc:
+        r.main()
+    assert exc.value.code == 2
+    assert session.connect_calls == 0
+    assert session.handlers == session.initial_handlers
+    assert not session.log.parent.exists()

@@ -15,6 +15,7 @@ settled verdict. Disagreement is the measurement, not an error.
 """
 
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -23,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from runtime_paths import LOGS_DIR, MODELS_DIR, STATE_DIR
+from execution_mode import PENDING_ORDER_FILE
 
 LOGS = LOGS_DIR
 HEARTBEAT_PATH = LOGS / "live_h2_heartbeat.jsonl"
@@ -59,6 +61,39 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # Pre-registered verdict set - DISPLAY ONLY, never evaluated here.
 REGISTERED_SET = ("H2p ev0.03", "H2s ev0.04", "H3 meta0.60", "H4")
+
+
+def observation_paths(mode: str | None = None) -> dict:
+    """Select records without enabling execution or requiring credentials.
+
+    Paper and practice share the historical research ledger. REAL records
+    have their own directory and never contribute to that forward test.
+    """
+    selected = mode if mode is not None else os.environ.get("ATLAS_MONITOR_MODE", "practice")
+    if selected not in {"paper", "practice", "real"}:
+        raise ValueError("monitor mode must be paper, practice, or real")
+    logs = LOGS_DIR / "real" if selected == "real" else LOGS_DIR
+    return {"mode": selected, "log_dir": logs,
+            "signals": logs / "live_h2.jsonl",
+            "heartbeat": logs / "live_h2_heartbeat.jsonl",
+            "supervisor": logs / "supervisor.log",
+            "pending": logs / PENDING_ORDER_FILE}
+
+
+def pending_submission(path: Path) -> dict:
+    """A persistent marker means a submission may have reached the broker.
+
+    Observation must not infer an outcome from the file or clear it, even
+    when the contents are damaged or another order was reconciled.
+    """
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return {"present": False}
+    except OSError:
+        return {"present": True, "note": "pending marker cannot be inspected; manual broker history reconciliation required"}
+    return {"present": True, "path": str(path),
+            "note": "order submission may be unresolved; manual broker history reconciliation required before restarting REAL orders"}
 
 
 # ---------------------------------------------------------------- jsonl I/O
@@ -559,16 +594,19 @@ def classify_health(*, now: int, heartbeat_ts: int | None, task_status: str | No
 
 # ------------------------------------------------------------- full status
 
-def build_status(now: int | None = None, deep: bool = True) -> dict:
+def build_status(now: int | None = None, deep: bool = True,
+                 mode: str | None = None) -> dict:
     """Everything status.py / dashboard.py / watchdog.py need, one dict.
     deep=False skips the databases (watchdog fast path)."""
+    paths = observation_paths(mode)
+    real = paths["mode"] == "real"
     now = int(now if now is not None else time.time())
-    heartbeats = read_jsonl(HEARTBEAT_PATH, tail=500)
+    heartbeats = read_jsonl(paths["heartbeat"], tail=500)
     hb_ts = int(heartbeats[-1]["ts"]) if heartbeats else None
     task = scheduled_task_state()
-    events = parse_supervisor_events(supervisor_tail())
+    events = parse_supervisor_events(supervisor_tail(paths["supervisor"]))
     churn = runner_churn(events, now)
-    rows = read_jsonl(SIGNALS_PATH)
+    rows = read_jsonl(paths["signals"])
     parts = split_signals(rows)
 
     candles = candle_freshness() if deep else {}
@@ -580,11 +618,20 @@ def build_status(now: int | None = None, deep: bool = True) -> dict:
         churn_events=churn, latest_candle_ts=latest_candle,
         supervisor_seen=bool(events), sidecars=sidecars,
     )
+    pending = pending_submission(paths["pending"]) if real else {"present": False}
+    if pending["present"]:
+        tier = "CRITICAL"
+        reasons.append(pending["note"])
 
     status = {
         "generated_utc": datetime.fromtimestamp(now, timezone.utc)
                          .isoformat(timespec="seconds"),
         "tier": tier,
+        "monitor_mode": paths["mode"],
+        "balance_mode": "REAL" if real else "PRACTICE",
+        "record_scope": "REAL account records" if real else "historical paper and PRACTICE records",
+        "log_dir": str(paths["log_dir"]),
+        "pending_submission": pending,
         "reasons": reasons,
         "task": task,
         "heartbeat": {
@@ -593,6 +640,7 @@ def build_status(now: int | None = None, deep: bool = True) -> dict:
             "last": heartbeats[-1] if heartbeats else None,
         },
         "supervisor": {
+            "log_path": str(paths["supervisor"]),
             "recent_events": [f"{datetime.fromtimestamp(ts, timezone.utc):%H:%M:%S}Z {msg}"
                               for ts, msg in events[-6:]],
             "runner_churn_recent": churn,
@@ -604,14 +652,17 @@ def build_status(now: int | None = None, deep: bool = True) -> dict:
             "otc_skipped": len(parts["skipped_otc"]),
             "last_signal": parts["signals"][-1] if parts["signals"] else None,
         },
-        "forward_progress": forward_progress(parts["signals"]),
+        "forward_progress": {} if real else forward_progress(parts["signals"]),
         "universe": universe_split(parts["signals"]) if deep else {},
         "sidecars": sidecars,
-        "registered_note": "counts only - verdicts belong to forward_eval.py, run once",
+        "shared_state_note": "market data and collector, catchup, and backup logs are shared across execution modes",
+        "registered_note": ("REAL records are excluded from the frozen forward test" if real else
+                            "counts only - verdicts belong to forward_eval.py, run once"),
     }
     if deep:
         status["market_db"] = candles
-        status["journal"] = journal_counts()
+        status["journal"] = ({"selected": False, "note": "historical MCP journal is not a REAL runner ledger"}
+                             if real else journal_counts())
         status["fidelity"] = label_fidelity(parts["settled"])
     return status
 

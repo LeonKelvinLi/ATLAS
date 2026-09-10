@@ -14,8 +14,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mission_control import (
-    HEARTBEAT_PATH, MARKET_DB, SIGNALS_PATH, build_status, expected_value,
-    read_jsonl, split_signals,
+    MARKET_DB, build_status, expected_value, observation_paths, read_jsonl,
+    split_signals,
 )
 
 VERDICT_WINDOW = "Jul 28 - Aug 6, 2026"
@@ -64,15 +64,17 @@ def latest_payouts() -> list[dict]:
         return []
 
 
-def build_payload() -> dict:
-    status = build_status()
-    heartbeats = read_jsonl(HEARTBEAT_PATH, tail=720)  # ~12h of cycles
-    parts = split_signals(read_jsonl(SIGNALS_PATH))
+def build_payload(mode: str | None = None) -> dict:
+    paths = observation_paths(mode)
+    status = build_status(mode=paths["mode"])
+    heartbeats = read_jsonl(paths["heartbeat"], tail=720)  # ~12h of cycles
+    parts = split_signals(read_jsonl(paths["signals"]))
     signals = [
         {
             "ts": r.get("ts"), "asset": r.get("asset"), "action": r.get("action"),
             "p_up": r.get("p_up"), "meta_p": r.get("meta_p"),
             "payout": r.get("payout"), "mode": r.get("mode"),
+            "balance_mode": r.get("balance_mode"), "amount": r.get("amount"),
             "order_id": r.get("order_id"),
             "skipped": r.get("trade_skipped"),
             "ev": round(expected_value(float(r["p_up"]), float(r["payout"])), 4)
@@ -94,7 +96,7 @@ def build_payload() -> dict:
         "signals": signals[-500:],
         "settled": settled[-500:],
         "payouts": latest_payouts(),
-        "verdict_window": VERDICT_WINDOW,
+        "verdict_window": "not applicable to REAL records" if paths["mode"] == "real" else VERDICT_WINDOW,
         "server_time": int(time.time()),
     }
 
@@ -214,12 +216,13 @@ td.dim { color:var(--dim); } .call { color:var(--green); } .put { color:var(--re
   <div class="tele" id="hb">awaiting telemetry…</div>
   <div class="clockbox"><div id="clock">--:--:--</div><div id="count"></div></div>
 </header>
+<div id="scope" class="tele"></div>
 <div id="reasons"></div>
 <div class="grid">
   <div class="card"><h2><span class="idx">01</span>Forward Test<span class="sub" id="vwindow"></span></h2>
     <div id="fwd"></div>
     <div class="meter"><i id="fwdbar" style="width:0%"></i></div>
-    <div class="tele" style="margin-top:6px">counts only — verdicts: forward_eval.py, run once</div></div>
+    <div id="registered-note" class="tele" style="margin-top:6px"></div></div>
   <div class="card"><h2><span class="idx">02</span>Label Fidelity<span class="sub">broker vs candle</span></h2>
     <div id="fid"></div>
     <div class="meter"><i id="fidbar" style="width:0%"></i></div></div>
@@ -230,10 +233,10 @@ td.dim { color:var(--dim); } .call { color:var(--green); } .put { color:var(--re
     <div class="tele" style="margin-top:6px">outside = no validated edge; the registered verdict excludes it</div></div>
   <div class="card w8"><h2><span class="idx">04</span>Model Confidence<span class="sub">max |p−.5| per cycle</span></h2><canvas id="conf"></canvas></div>
   <div class="card"><h2><span class="idx">05</span>Signals · UTC Hour</h2><canvas id="hours"></canvas></div>
-  <div class="card"><h2><span class="idx">06</span>Equity<span class="sub">settled demo $</span></h2><canvas id="equity"></canvas></div>
+  <div class="card"><h2><span class="idx">06</span>Settled P&amp;L<span class="sub" id="equity-label">account currency</span></h2><canvas id="equity"></canvas></div>
   <div class="card"><h2><span class="idx">07</span>Win Rate · Asset</h2><canvas id="wr"></canvas></div>
   <div class="card"><h2><span class="idx">08</span>Live Payouts<span class="sub">binary · ours only · * = frozen 16</span></h2><canvas id="pay"></canvas></div>
-  <div class="card"><h2><span class="idx">8b</span>Edge Margin<span class="sub">57% expectation − break-even</span></h2><canvas id="roi"></canvas></div>
+  <div class="card"><h2><span class="idx">8b</span>Win Rate Scenario<span class="sub">assumed 57% − break-even</span></h2><canvas id="roi"></canvas></div>
   <div class="card w12"><h2><span class="idx">09</span>Signal Ledger<span class="sub">latest 25</span></h2>
     <table id="recent"><thead><tr><th>time utc</th><th>asset</th><th>side</th>
     <th>p_up</th><th>meta_p</th><th>ev</th><th>payout</th><th>mode</th><th>order</th></tr></thead>
@@ -250,11 +253,12 @@ function utc(ts){ return new Date(ts*1000).toISOString().slice(5,16).replace("T"
 
 /* mission clock + verdict countdown, ticking client-side */
 const VERDICT_OPEN = Date.UTC(2026,6,28);
+let monitorMode = null;
 function tick(){
   const now = new Date();
   el("clock").textContent = now.toISOString().slice(11,19)+" UTC";
   const dms = VERDICT_OPEN - now.getTime();
-  el("count").textContent = dms > 0
+  el("count").textContent = monitorMode === "real" ? "REAL account records" : dms > 0
     ? "T−" + Math.floor(dms/86400000) + "d " +
       String(Math.floor(dms/3600000)%24).padStart(2,"0") + "h to verdict window"
     : "verdict window OPEN — forward_eval.py runs once";
@@ -330,6 +334,10 @@ const kv=(k,v,cls)=>`<div class="kv"><span>${k}</span><b class="${cls||""}">${v}
 async function refresh(){
   const d = await (await fetch("/api/data")).json();
   const s = d.status;
+  monitorMode = s.monitor_mode;
+  el("scope").textContent = s.record_scope + " · " + s.shared_state_note;
+  el("registered-note").textContent = s.registered_note;
+  el("equity-label").textContent = s.balance_mode + " · account currency";
   el("tier").textContent = s.tier;
   el("tier").className = s.tier;
   el("lamp").className = "lamp "+s.tier;
@@ -341,7 +349,7 @@ async function refresh(){
     : "no heartbeat yet";
 
   const fp = s.forward_progress, target = 100;
-  el("fwd").innerHTML = Object.entries(fp).map(([k,v])=>kv(k,v)).join("");
+  el("fwd").innerHTML = Object.entries(fp).map(([k,v])=>kv(k,v)).join("") || "Not applicable";
   el("fwdbar").style.width = Math.min(100, 100*(fp["H2p ev0.03"]||0)/target)+"%";
 
   const f = s.fidelity||{};
@@ -383,7 +391,7 @@ async function refresh(){
 
   let cum=0; const eq = d.settled.filter(x=>x.profit!=null)
     .map(x=>[x.ts, (cum+=x.profit)]);
-  line("equity", eq, cum>=0?GREEN:RED, v=>"$"+v.toFixed(2));
+  line("equity", eq, cum>=0?GREEN:RED, v=>v.toFixed(2));
 
   const per={};
   d.settled.forEach(x=>{ if(!x.result) return;
@@ -415,7 +423,7 @@ async function refresh(){
       <td>${x.ev??"—"}</td><td class="dim">${x.payout}</td>
       <td class="dim">${x.mode}${x.skipped?" ·skip":""}</td>
       <td class="dim">${x.order_id??"—"}</td></tr>`).join("")
-    : `<tr><td colspan="9"><div class="empty">· ledger empty — the meta filter is being selective, which is the edge ·</div></td></tr>`;
+    : `<tr><td colspan="9"><div class="empty">No signals recorded in the selected scope.</div></td></tr>`;
 }
 refresh(); setInterval(refresh, 60000);
 addEventListener("resize", ()=>refresh());
@@ -424,9 +432,11 @@ addEventListener("resize", ()=>refresh());
 
 
 class Handler(BaseHTTPRequestHandler):
+    monitor_mode = None
+
     def do_GET(self):
         if self.path.startswith("/api/data"):
-            body = json.dumps(build_payload(), default=str).encode()
+            body = json.dumps(build_payload(mode=self.monitor_mode), default=str).encode()
             ctype = "application/json"
         elif self.path in ("/", "/index.html"):
             body = PAGE.encode()
@@ -445,12 +455,19 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", type=int, default=8787)
-    args = ap.parse_args()
+    ap.add_argument("--mode", choices=("paper", "practice", "real"),
+                    help="record scope; defaults to ATLAS_MONITOR_MODE or practice")
+    args = ap.parse_args(argv)
+    try:
+        mode = observation_paths(args.mode)["mode"]
+    except ValueError as exc:
+        ap.error(str(exc))
+    Handler.monitor_mode = mode
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"ATLAS Mission Control -> http://127.0.0.1:{args.port}  (Ctrl-C stops)")
+    print(f"ATLAS {mode.upper()} Mission Control -> http://127.0.0.1:{args.port}  (Ctrl-C stops)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

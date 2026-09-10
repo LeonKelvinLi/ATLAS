@@ -2,7 +2,7 @@
 
 A Python toolkit for researching short-horizon FX direction and checking whether model predictions translate into executable binary-option contracts.
 
-ATLAS combines candle storage, causal features, calibrated models, expected-value signal rules, and a validation harness that accounts for overlapping labels and correlated trades. An optional IQ Option adapter exposes market data and PRACTICE-account operations through MCP. You can explore the core pipeline locally without a broker account.
+ATLAS combines candle storage, causal features, calibrated models, expected-value signal rules, and a validation harness that accounts for overlapping labels and correlated trades. An optional IQ Option adapter exposes market data and guarded account operations through MCP. You can explore the core pipeline locally without a broker account.
 
 ## Start with the offline demo
 
@@ -40,7 +40,7 @@ The Python runtime supports an external state directory via `ATLAS_STATE_DIR`, w
 uv run --locked python runtime_paths.py
 ```
 
-The supervisor requires an explicit `--mode paper` or `--mode practice` (`--paper` remains an alias). These are future runtime choices, not part of the offline quickstart. Watchdog recovery and dashboard startup are also opt-in. Server process management and deployment remain unconfigured.
+The supervisor requires an explicit `--mode paper`, `--mode practice`, or `--mode real` (`--paper` remains an alias). Real execution also requires `IQ_ALLOW_REAL=1` and an explicit finite positive `--amount` in the account's currency. These are future server runtime choices, not part of the offline quickstart. Watchdog recovery and dashboard startup are also opt-in. Server process management and deployment remain unconfigured.
 
 ## What is in the repository
 
@@ -54,7 +54,7 @@ The supervisor requires an explicit `--mode paper` or `--mode practice` (`--pape
 | Experiment history | [`registry.py`](registry.py), [`research_registry.jsonl`](research_registry.jsonl) | Record experiment families and trial counts |
 | Frozen forward test | [`FORWARD_TEST.md`](FORWARD_TEST.md), [`forward_eval.py`](forward_eval.py) | Define and evaluate the pre-registered hypotheses under their original rules |
 | Broker integration | [`server.py`](server.py), [`instruments.py`](instruments.py), [`execution_guard.py`](execution_guard.py) | Expose MCP tools, resolve instrument identifiers, and guard order execution |
-| Operational tools | [`supervisor.py`](supervisor.py), [`mission_control.py`](mission_control.py), [`journal.py`](journal.py) | Coordinate collection and paper/demo sessions, inspect health, and reconcile broker outcomes |
+| Operational tools | [`supervisor.py`](supervisor.py), [`mission_control.py`](mission_control.py), [`journal.py`](journal.py) | Coordinate collection and explicitly selected sessions, inspect health, and reconcile broker outcomes |
 | Tests | [`tests/`](tests/) | Check pipeline behavior, leakage boundaries, evaluation criteria, and operational guards |
 
 Research modules also cover historical replication, era holdouts, OTC/spot comparisons, spread sensitivity, and calibration. Their results and rejected approaches are indexed in [`FINDINGS.md`](FINDINGS.md).
@@ -100,7 +100,7 @@ Keep new engineering examples separate from frozen models and forward evidence. 
 
 ## Optional broker integration
 
-The broker adapter uses the separately installed, unofficial [`iqoptionapi`](https://github.com/iqoptionapi/iqoptionapi) library. It is not needed for the offline demo. Broker workflows additionally need account credentials, appropriate collected data, and compatible model artifacts. The included historical pickles do not establish that a fresh clone is ready for operation.
+The broker adapter uses the separately installed, unofficial [`iqoptionapi`](https://github.com/iqoptionapi/iqoptionapi) library, whose maintainers caution against real-account use. It is not needed for the offline demo. Broker workflows additionally need account credentials, appropriate collected data, and compatible model artifacts. The included historical pickles do not establish that a fresh clone is ready for operation.
 
 For explicit PRACTICE-account use, copy [`.env.example`](.env.example) to the gitignored `.env` file and supply the broker credentials there. Keep these settings:
 
@@ -109,6 +109,18 @@ IQ_DEFAULT_BALANCE=PRACTICE
 IQ_ALLOW_REAL=0
 ```
 
-`server.py` reads `.env` when its process starts. Its MCP tools cover connection status, market data, payouts, and guarded order operations. Only one trading runner should control a given account at a time.
+The runner and supervisor support these explicit selections:
+
+| Mode | Order behavior | Required stake selection |
+|---|---|---|
+| `paper` | Log predictions; place no orders | `--amount` is rejected |
+| `practice` | Place orders on the PRACTICE balance | Defaults to 1 account-currency unit; `--amount` may override it |
+| `real` | Place orders on the REAL balance only with `IQ_ALLOW_REAL=1` | An explicit finite positive `--amount` is required |
+
+The runner selects its balance from the CLI mode and checks it again before every order. An unexpected or unreadable balance blocks that order. Real signals, heartbeats, cross-sections, and supervisor logs live beneath `logs/real/`; the frozen paper/practice evidence stays at its historical paths. One account-currency unit does not necessarily mean one US dollar.
+
+Each real runner submission first creates `logs/real/order_submission_pending.json`. An unknown acknowledgement or crash during submission leaves this marker in place and blocks automatic restarts. Reconcile the exact submission against broker history before manually clearing a remaining marker; neither the supervisor nor a successful restart clears it for you. See [server readiness](docs/server-readiness.md) for the recovery boundary and verification limits.
+
+`server.py` reads `.env` when its process starts. Its MCP tools cover connection status, market data, payouts, and guarded order operations. Only one trading runner should control a given account at a time. The local development work has not enabled a funded account, connected to the broker, or placed an order.
 
 [`WINDOWS_SETUP.md`](WINDOWS_SETUP.md) and the operational scripts document the earlier host setup. Paths, scheduled jobs, and host state in those records need to be checked for the machine being configured. Cloning the repository or running the offline quickstart does not start a collector, supervisor, or trading session.

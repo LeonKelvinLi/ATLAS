@@ -42,6 +42,30 @@ TARGETS = [
 ]
 
 
+def real_record_targets(project: Path) -> list[str]:
+    """Discover REAL operational records without following links or secrets.
+
+    Preserve the pending submission marker and raw reconciliation history.
+    Restrict extensions to the runner's log/record formats; credentials and
+    hidden files remain outside the evidence backup, even if misplaced here.
+    """
+    root = project / "logs" / "real"
+    if (project / "logs").is_symlink() or root.is_symlink() or not root.exists():
+        return []
+    targets = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        parts = relative.parts
+        if any(part.startswith(".") or any(word in part.lower() for word in
+               ("credential", "secret", "password", "token")) for part in parts):
+            continue
+        if any((root / Path(*parts[:i])).is_symlink() for i in range(1, len(parts) + 1)):
+            continue
+        if path.is_file() and path.suffix in {".jsonl", ".json", ".log"}:
+            targets.append(path.relative_to(project).as_posix())
+    return targets
+
+
 def _copy_atomic(src: Path, dst: Path) -> None:
     """Copy via a temp sidecar then atomically replace, so a crash or a
     locked destination never leaves a half-written backup in place."""
@@ -83,15 +107,24 @@ def run_backup(project: Path = STATE_DIR, dest: Path | None = BACKUP_DIR) -> dic
         raise ValueError("backup destination must be an absolute path")
     if dest.resolve() == Path(project).resolve():
         raise ValueError("backup destination must differ from the source state directory")
+    project = Path(project)
+    if dest.resolve().is_relative_to((project / "logs" / "real").resolve()):
+        raise ValueError("backup destination must be outside the REAL record tree")
     dest.mkdir(parents=True, exist_ok=True)
     copied, missing, failed, total = [], [], [], 0
-    for rel in TARGETS:
+    try:
+        real_targets = real_record_targets(project)
+    except OSError as exc:
+        real_targets = []
+        failed.append(f"logs/real ({type(exc).__name__})")
+    for rel in [*TARGETS, *real_targets]:
         src = project / rel
         try:
             if not src.exists():
                 missing.append(rel)
                 continue
-            out = dest / rel.replace("/", "_")
+            out = dest / rel if rel.startswith("logs/real/") else dest / rel.replace("/", "_")
+            out.parent.mkdir(parents=True, exist_ok=True)
             if src.suffix == ".db":
                 _copy_sqlite(src, out)
             else:

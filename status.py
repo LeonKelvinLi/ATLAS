@@ -11,7 +11,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from mission_control import build_status, tier_exit_code
+from mission_control import build_status, observation_paths, tier_exit_code
 
 TIER_MARK = {"HEALTHY": "OK ", "WARNING": "WRN", "CRITICAL": "CRT"}
 
@@ -26,18 +26,26 @@ def fmt_age(seconds):
     return f"{seconds / 3600:.1f}h"
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--json", action="store_true", help="raw JSON output")
-    args = ap.parse_args()
+    ap.add_argument("--mode", choices=("paper", "practice", "real"),
+                    help="record scope; defaults to ATLAS_MONITOR_MODE or practice")
+    args = ap.parse_args(argv)
+    try:
+        mode = observation_paths(args.mode)["mode"]
+    except ValueError as exc:
+        ap.error(str(exc))
 
-    s = build_status()
+    s = build_status(mode=mode)
     if args.json:
         print(json.dumps(s, indent=2, default=str))
         return tier_exit_code(s["tier"])
 
     now = time.time()
-    print(f"=== ATLAS {s['tier']} === {s['generated_utc']}")
+    print(f"=== ATLAS {s['monitor_mode'].upper()} {s['tier']} === {s['generated_utc']}")
+    print(f"  {s['record_scope']} | {s['log_dir']}")
+    print(f"  {s['shared_state_note']}")
     for r in s["reasons"]:
         print(f"  [{TIER_MARK[s['tier']]}] {r}")
 
@@ -68,7 +76,7 @@ def main() -> int:
         print(f"  last: {when} {ls['asset']} {ls['action']} p={ls['p_up']} "
               f"payout={ls['payout']} mode={ls['mode']}")
 
-    print("\n--- forward-test progress (counts only; verdicts = forward_eval.py, once) ---")
+    print(f"\n--- {s['registered_note']} ---")
     for k, v in s["forward_progress"].items():
         print(f"  {k}: {v}")
 
