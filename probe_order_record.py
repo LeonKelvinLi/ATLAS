@@ -23,11 +23,10 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
+from runtime_paths import LOGS_DIR
 
-PROJECT_DIR = Path(__file__).resolve().parent
-OUT_DIR = PROJECT_DIR / "logs" / "order_records"
-SIGNAL_LOG = PROJECT_DIR / "logs" / "live_h2.jsonl"
+OUT_DIR = LOGS_DIR / "order_records"
+SIGNAL_LOG = LOGS_DIR / "live_h2.jsonl"
 
 # Field names worth reporting on sight: any of these would let us compare
 # IQ's own strike/expiry price against our candle label directly.

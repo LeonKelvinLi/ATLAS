@@ -65,3 +65,27 @@ def test_watchdog_uses_hard_exit_not_sys_exit():
     body = src.split('"""')[-1]
     assert "os._exit" in body
     assert "sys.exit" not in body
+
+
+def test_watchdog_exits_on_shutdown_without_killing_stalled_main(monkeypatch):
+    started = {}
+    killed = []
+
+    class FakeThread:
+        def __init__(self, target, daemon):
+            started["target"] = target
+
+        def start(self):
+            pass
+
+    class StoppingEvent:
+        def wait(self, timeout):
+            assert timeout == 30
+            return True
+
+    monkeypatch.setattr(r.threading, "Thread", FakeThread)
+    monkeypatch.setattr(r.os, "_exit", lambda code: killed.append(code))
+    monkeypatch.setattr(r, "_LAST_PROGRESS", time.time() - 1000)
+    r._start_cycle_watchdog(stop_event=StoppingEvent())
+    started["target"]()
+    assert killed == []

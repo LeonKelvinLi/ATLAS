@@ -16,11 +16,11 @@ import argparse
 import json
 import os
 import pickle
+import signal
 import sys
 import threading
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -28,9 +28,9 @@ import pandas as pd
 from features import build_features
 from instruments import INSTRUMENTS
 from research_pooled import currencies
+from runtime_paths import ENV_FILE, LOGS_DIR, MODELS_DIR, load_env_file
 from train import decide_action
 
-PROJECT_DIR = Path(__file__).resolve().parent
 CANDLE_COUNT = 560  # covers REGIME_WINDOW=480 warmup plus slack
 EV_MARGIN = 0.03    # FORWARD_TEST.md hypothesis #2 primary gate - do not tune
 REGISTERED_CUTOFF_TS = 1784678400  # 2026-07-22T00:00:00Z, FORWARD_TEST.md
@@ -45,16 +45,54 @@ _LAST_PROGRESS = 0.0  # epoch of the last completed cycle step
 EXPIRY_MINUTES = 15
 TRADE_AMOUNT = 1.0
 _LOCK_SOCK = None  # single-instance lock socket, bound in main()
+SHUTDOWN_BUY_GRACE_S = 5.0
+SHUTDOWN_RECONCILE_S = 8.0  # total budget, never per outstanding order
+SHUTDOWN_CLOSE_S = 2.0
 
 
-def _call(fn, *args, timeout=60, **kwargs):
+class ShutdownRequested(Exception):
+    """Stop an interruptible call without pretending the broker cancelled it."""
+
+    def __init__(self, *, call_started: bool = False):
+        super().__init__("runner shutdown requested")
+        self.call_started = call_started
+
+
+def _check_shutdown(stop_event) -> None:
+    if stop_event is not None and stop_event.is_set():
+        raise ShutdownRequested()
+
+
+def _install_signal_handlers(stop_event, watchdog_stop_event=None) -> dict:
+    """The handler only sets flags; normal Python code owns cleanup."""
+    previous = {}
+
+    def request_shutdown(_signum, _frame):
+        stop_event.set()
+        if watchdog_stop_event is not None:
+            watchdog_stop_event.set()
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous[signum] = signal.signal(signum, request_shutdown)
+    return previous
+
+
+def _call(fn, *args, timeout=60, stop_event=None, shutdown_grace=0.0, **kwargs):
     """Blocking library call on a daemon thread with a hard timeout (the
-    iqoptionapi library busy-waits forever on lost replies)."""
+    iqoptionapi library busy-waits forever on lost replies).
+
+    Cancelling the wait cannot cancel an in-flight library call. Orders get
+    a short acknowledgement grace, and an absent acknowledgement must be
+    recorded as an unknown submission, never a refused/cancelled order.
+    """
+    _check_shutdown(stop_event)
     box = {}
     done = threading.Event()
 
     def runner():
         try:
+            _check_shutdown(stop_event)
+            box["started"] = True
             box["value"] = fn(*args, **kwargs)
         except Exception as exc:
             box["error"] = exc
@@ -62,8 +100,19 @@ def _call(fn, *args, timeout=60, **kwargs):
             done.set()
 
     threading.Thread(target=runner, daemon=True).start()
-    if not done.wait(timeout):
-        raise TimeoutError(f"{getattr(fn, '__name__', fn)} timed out after {timeout}s")
+    deadline = time.monotonic() + timeout
+    shutdown_deadline = None
+    while not done.is_set():
+        now = time.monotonic()
+        if stop_event is not None and stop_event.is_set():
+            if shutdown_deadline is None:
+                shutdown_deadline = now + shutdown_grace
+            if now >= shutdown_deadline:
+                raise ShutdownRequested(call_started=bool(box.get("started")))
+        remaining = deadline - now
+        if remaining <= 0:
+            raise TimeoutError(f"{getattr(fn, '__name__', fn)} timed out after {timeout}s")
+        done.wait(min(0.1, remaining))
     if "error" in box:
         raise box["error"]
     return box["value"]
@@ -75,7 +124,8 @@ def _note_progress() -> None:
     _LAST_PROGRESS = time.time()
 
 
-def _start_cycle_watchdog(deadline_s: int = CYCLE_DEADLINE_S) -> None:
+def _start_cycle_watchdog(deadline_s: int = CYCLE_DEADLINE_S,
+                          stop_event=None) -> threading.Thread:
     """Force a relaunch if the cycle loop stops making progress.
 
     Deliberately uses os._exit: the main thread is, by definition, blocked
@@ -83,49 +133,95 @@ def _start_cycle_watchdog(deadline_s: int = CYCLE_DEADLINE_S) -> None:
     would never be delivered. That skips settle_open_orders, but an order left
     open is recoverable later with settle_missing.py, whereas a wedged runner
     silently stops trading until the hourly relaunch."""
+    stop_event = stop_event if stop_event is not None else threading.Event()
+
     def watch():
-        while True:
-            time.sleep(30)
+        while not stop_event.wait(30):
             if _LAST_PROGRESS and time.time() - _LAST_PROGRESS > deadline_s:
+                if stop_event.is_set():
+                    return
                 stalled = int(time.time() - _LAST_PROGRESS)
                 print(f"CYCLE WATCHDOG: no progress for {stalled}s "
                       f"(deadline {deadline_s}s) - forcing relaunch",
                       file=sys.stderr, flush=True)
-                os._exit(1)
+                if not stop_event.is_set():
+                    os._exit(1)
 
-    threading.Thread(target=watch, daemon=True).start()
+    thread = threading.Thread(target=watch, daemon=True)
+    thread.start()
+    return thread
 
 
 def _load_env() -> None:
-    env_file = PROJECT_DIR / ".env"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                os.environ.setdefault(key.strip(), value.strip())
+    load_env_file(ENV_FILE)
 
 
-def settle_open_orders(client, open_orders, log_path) -> None:
+def settle_open_orders(client, open_orders, log_path,
+                       timeout_budget=None, stop_event=None) -> None:
     """Query the broker verdict for any still-open orders and append their
-    settled records. Called from every exit path so a failure bail cannot
-    drop execution-attribution data (audit M1)."""
-    for order_id, record in open_orders:
+    settled records. Ordinary completion preserves the existing expiry
+    wait; SIGTERM/SIGINT interrupts it and switches to one shared shutdown
+    deadline. Unresolved records remain in the signal log for
+    settle_missing.py; no settlement is invented. An explicit budget is
+    useful for callers that already know they need a bounded reconciliation.
+    """
+    deadline = (time.monotonic() + timeout_budget
+                if timeout_budget is not None else None)
+    pending = []
+    for index, (order_id, record) in enumerate(open_orders):
+        if deadline is None and stop_event is not None and stop_event.is_set():
+            deadline = time.monotonic() + SHUTDOWN_RECONCILE_S
+        timeout = EXPIRY_MINUTES * 60 + 120
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                pending.extend(open_orders[index:])
+                break
+            timeout = remaining / (len(open_orders) - index)
         try:
             result, profit = _call(client.check_win_v4, order_id,
-                                   timeout=EXPIRY_MINUTES * 60 + 120)
+                                   timeout=timeout,
+                                   stop_event=stop_event if deadline is None else None)
+            if (result not in {"win", "loose", "equal"}
+                    or isinstance(profit, bool)
+                    or not isinstance(profit, (int, float))
+                    or not np.isfinite(profit)):
+                raise ValueError("broker did not return a completed, finite verdict")
             outcome = {**record, "result": result, "profit": profit, "settled": True}
             with open(log_path, "a") as fh:
                 fh.write(json.dumps(outcome) + "\n")
+        except ShutdownRequested:
+            # The old call may still finish in its daemon thread. Do not
+            # duplicate it or guess its result; later history can recover it.
+            deadline = time.monotonic() + SHUTDOWN_RECONCILE_S
+            pending.append((order_id, record))
         except Exception as exc:
+            pending.append((order_id, record))
             print(f"WARN settle {order_id}: {exc}", file=sys.stderr, flush=True)
-    open_orders.clear()
+    open_orders[:] = pending
+    if pending:
+        print(f"{len(pending)} order(s) remain unresolved in {log_path}; "
+              "recover broker verdicts later with settle_missing.py",
+              file=sys.stderr, flush=True)
+
+
+def _close_client(client) -> None:
+    """Bound disconnect too: the optional broker library may hang here."""
+    close = getattr(client, "close", None)
+    if not callable(close):
+        close = getattr(getattr(client, "api", None), "close", None)
+    if callable(close):
+        try:
+            _call(close, timeout=SHUTDOWN_CLOSE_S)
+        except Exception as exc:
+            print(f"WARN disconnect: {exc}", file=sys.stderr, flush=True)
 
 
 def load_frozen_model():
-    paths = sorted((PROJECT_DIR / "models").glob("h2-*.pkl"))
+    paths = sorted(MODELS_DIR.glob("h2-*.pkl"))
     if not paths:
-        raise SystemExit("no models/h2-*.pkl - run live_model_build.py first")
+        raise SystemExit(f"no h2-*.pkl in {MODELS_DIR}; restore and verify the "
+                         "approved frozen bundle before running")
     with open(paths[-1], "rb") as fh:
         bundle = pickle.load(fh)
     return paths[-1].name, bundle["model"], bundle["meta"]
@@ -137,7 +233,7 @@ def load_shadow_h4():
     on identical timestamps/prices/payouts (Farxida-style parallel tracks).
     The inverted / no-meta / threshold tracks need no extra logging: they are
     derivable from p_up and meta_p already in the log."""
-    paths = sorted((PROJECT_DIR / "models").glob("h4-*.pkl"))
+    paths = sorted(MODELS_DIR.glob("h4-*.pkl"))
     if not paths:
         return None
     with open(paths[-1], "rb") as fh:
@@ -147,7 +243,7 @@ def load_shadow_h4():
 def load_meta_filter():
     """Optional hypothesis-#3 meta model. Signals are NEVER gated by it here;
     its probability is logged per signal so H3 can be evaluated later."""
-    path = PROJECT_DIR / "models" / "meta-h3.pkl"
+    path = MODELS_DIR / "meta-h3.pkl"
     if not path.exists():
         return None
     with open(path, "rb") as fh:
@@ -228,14 +324,18 @@ def cross_asset_columns(frame: pd.DataFrame, basket: set[str] | None):
     return base_str, quote_str, mkt_vol
 
 
-def latest_feature_rows(client, horizon: int, basket: set[str] | None = None) -> pd.DataFrame:
+def latest_feature_rows(client, horizon: int, basket: set[str] | None = None,
+                        stop_event=None) -> pd.DataFrame:
     """One feature row per asset for the most recent CLOSED bar, with
     cross-asset currency-strength columns computed from the same snapshot."""
     per_asset = []
     for asset in INSTRUMENTS:
+        _check_shutdown(stop_event)
         try:
             now = time.time()  # per-asset: early timeouts must not stale the tail
-            raw = _call(client.get_candles, asset, 60, CANDLE_COUNT, now, timeout=30)
+            raw = _call(client.get_candles, asset, 60, CANDLE_COUNT, now,
+                        timeout=30, stop_event=stop_event)
+            _check_shutdown(stop_event)
             candles = normalize(raw)
             # The newest bar may still be forming; keep only closed bars.
             candles = candles[candles["to_ts"] <= now + 1]
@@ -245,6 +345,8 @@ def latest_feature_rows(client, horizon: int, basket: set[str] | None = None) ->
             row = ff.iloc[[-1]].copy()
             row["asset"] = asset
             per_asset.append(row)
+        except ShutdownRequested:
+            raise
         except Exception as exc:
             print(f"WARN {asset}: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
     if not per_asset:
@@ -259,39 +361,17 @@ def latest_feature_rows(client, horizon: int, basket: set[str] | None = None) ->
     return frame
 
 
-def live_quotes(client) -> dict:
+def live_quotes(client, stop_event=None) -> dict:
     """Payout table only. get_all_open_time is NOT used: the vendored
     library's digital-options sub-fetch crashes internally and the call
     times out every time. Openness is inferred from candle freshness
     instead - a market that closed a bar in the last 3 minutes is trading,
     and a closed market cannot produce fresh bars."""
-    return _call(client.get_all_profit, timeout=90)
+    return _call(client.get_all_profit, timeout=90, stop_event=stop_event)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--minutes", type=int, default=60, help="how long to run")
-    parser.add_argument("--trade", action="store_true",
-                        help="place $1 PRACTICE binaries (default: paper log only)")
-    args = parser.parse_args()
-
-    _load_env()
-    # Single-instance lock (portable: macOS/Windows/Linux). A localhost
-    # socket bind is held for the process lifetime and released by the OS on
-    # exit or crash - no fcntl (Unix-only) and no stale lockfile. Prevents
-    # two runners double-writing the signal log and double-placing orders.
-    import socket
-
-    global _LOCK_SOCK
-    _LOCK_SOCK = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        _LOCK_SOCK.bind(("127.0.0.1", 47201))
-    except OSError:
-        print("another runner instance holds the lock - exiting cleanly", flush=True)
-        return 0
-
-    from iqoptionapi.stable_api import IQ_Option
-
+def _run(args, client, stop_event, watchdog_stop_event, open_orders, log_path) -> int:
+    _check_shutdown(stop_event)
     model_name, model, meta = load_frozen_model()
     meta_bundle = load_meta_filter()
     h4_bundle = load_shadow_h4()
@@ -322,30 +402,32 @@ def main() -> int:
         print("WARN model bundle has no 'assets' - cross-asset columns fall "
               "back to the full live basket", file=sys.stderr, flush=True)
 
-    client = IQ_Option(os.environ["IQ_EMAIL"], os.environ["IQ_PASSWORD"])
-    ok, reason = _call(client.connect, timeout=90)
+    ok, reason = _call(client.connect, timeout=90, stop_event=stop_event)
     if not ok:
         raise SystemExit(f"login failed: {reason}")
-    _call(client.change_balance, "PRACTICE")
-    if _call(client.get_balance_mode) != "PRACTICE":
+    _call(client.change_balance, "PRACTICE", stop_event=stop_event)
+    if _call(client.get_balance_mode, stop_event=stop_event) != "PRACTICE":
         raise SystemExit("refusing to run: balance mode is not PRACTICE")
 
-    log_path = PROJECT_DIR / "logs" / "live_h2.jsonl"
-    log_path.parent.mkdir(exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.time() + args.minutes * 60
-    open_orders = []
     consecutive_failures = 0
 
     _note_progress()
-    _start_cycle_watchdog()
+    _start_cycle_watchdog(stop_event=watchdog_stop_event)
 
-    while time.time() < deadline:
+    while not stop_event.is_set() and time.time() < deadline:
         # Wait for the next minute boundary + 2s so the bar is fully closed.
-        time.sleep(max(0.0, 60 - time.time() % 60) + 2)
+        pause = max(0.0, 60 - time.time() % 60) + 2
+        if stop_event.wait(min(pause, max(0.0, deadline - time.time()))):
+            break
+        if time.time() >= deadline:
+            break
         cycle_ts = int(time.time())
         _note_progress()
         try:
-            frame = latest_feature_rows(client, horizon, basket)
+            frame = latest_feature_rows(client, horizon, basket, stop_event=stop_event)
+            _check_shutdown(stop_event)
             if frame.empty:
                 # A fully dead connection lands here for every cycle; the
                 # old code skipped both the heartbeat and the failure
@@ -357,13 +439,14 @@ def main() -> int:
                 if consecutive_failures >= 5:
                     print("5 consecutive empty cycles - exiting for relaunch",
                           file=sys.stderr, flush=True)
-                    settle_open_orders(client, open_orders, log_path)
                     sys.exit(1)
                 continue
-            profits = live_quotes(client)
+            profits = live_quotes(client, stop_event=stop_event)
+            _check_shutdown(stop_event)
             p_up = model.predict_proba_up(frame[feature_cols])
             fired = 0
             for (_, row), p in zip(frame.iterrows(), p_up):
+                _check_shutdown(stop_event)
                 asset = row["asset"]
                 spec = INSTRUMENTS[asset]
                 quote = profits.get(spec.quote_key, {})
@@ -401,6 +484,7 @@ def main() -> int:
                     "h4_p": round(h4_p, 6) if h4_p is not None else None,
                     "decision_latency_s": int(time.time()) - int(row["to_ts"]),
                 }
+                submission_failed = False
                 # OTC EXCLUSION (2026-07-24, research_otc.py): pre-cutoff
                 # broker data shows OTC at 47.1% independent win rate -
                 # below break-even and below coin flip, while spot runs
@@ -420,7 +504,10 @@ def main() -> int:
                     # Refuse rather than switch: skipping a trade costs one
                     # data point, a real order costs real money.
                     try:
-                        mode = _call(client.get_balance_mode, timeout=30)
+                        mode = _call(client.get_balance_mode, timeout=30,
+                                     stop_event=stop_event)
+                    except ShutdownRequested:
+                        raise
                     except Exception as exc:
                         mode = f"unreadable:{type(exc).__name__}"
                     if mode != "PRACTICE":
@@ -429,20 +516,48 @@ def main() -> int:
                               f"{mode!r}, not PRACTICE",
                               file=sys.stderr, flush=True)
                     else:
-                        ok, order_id = _call(
-                            client.buy, TRADE_AMOUNT, spec.order_active,
-                            "call" if action == "binary_call" else "put",
-                            EXPIRY_MINUTES, timeout=60,
-                        )
-                        record["order_id"] = order_id if ok else None
-                        if not ok:
-                            record["order_error"] = str(order_id)
+                        try:
+                            ok, order_id = _call(
+                                client.buy, TRADE_AMOUNT, spec.order_active,
+                                "call" if action == "binary_call" else "put",
+                                EXPIRY_MINUTES, timeout=60, stop_event=stop_event,
+                                shutdown_grace=SHUTDOWN_BUY_GRACE_S,
+                            )
+                        except (ShutdownRequested, TimeoutError) as exc:
+                            record["order_id"] = None
+                            submission_failed = isinstance(exc, TimeoutError)
+                            if submission_failed or exc.call_started:
+                                record["order_submission_unknown"] = True
+                                record["order_error"] = (
+                                    "acknowledgement_timeout" if submission_failed
+                                    else "shutdown_before_acknowledgement"
+                                )
+                                print(f"WARN {asset}: order acknowledgement absent; "
+                                      "submission status UNKNOWN. Inspect broker history "
+                                      "before resuming; this does not mean cancelled.",
+                                      file=sys.stderr, flush=True)
+                            else:
+                                record["trade_skipped"] = "shutdown_requested"
                         else:
-                            open_orders.append((order_id, record))
+                            record["order_id"] = order_id if ok else None
+                            if not ok:
+                                record["order_error"] = str(order_id)
+                            else:
+                                open_orders.append((order_id, record))
                 with open(log_path, "a") as fh:
                     fh.write(json.dumps(record) + "\n")
+                    if "order_id" in record:
+                        fh.flush()
+                        os.fsync(fh.fileno())
                 print(json.dumps(record), flush=True)
                 fired += 1
+                if submission_failed:
+                    # The normal call deadline may win the race with a
+                    # shutdown signal. Preserve the unknown submission in
+                    # either case, then end this session without more buys.
+                    stop_event.set()
+                    return 1
+            _check_shutdown(stop_event)
             # FULL CROSS-SECTION (2026-07-26). Only signals clearing the
             # frozen EV gate reach live_h2.jsonl, so no lower gate, wider
             # universe or different meta threshold can EVER be evaluated on
@@ -489,6 +604,8 @@ def main() -> int:
                     "signals": fired,
                 }) + "\n")
             consecutive_failures = 0
+        except ShutdownRequested:
+            raise
         except Exception as exc:
             print(f"WARN cycle: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             consecutive_failures += 1
@@ -498,13 +615,71 @@ def main() -> int:
             if consecutive_failures >= 5:
                 print("5 consecutive cycle failures - exiting for relaunch",
                       file=sys.stderr, flush=True)
-                settle_open_orders(client, open_orders, log_path)
                 sys.exit(1)
 
-    # Collect outcomes for any orders still open before exiting.
-    settle_open_orders(client, open_orders, log_path)
-    print(f"done {datetime.now(timezone.utc).isoformat()}", flush=True)
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--minutes", type=int, default=60, help="how long to run")
+    parser.add_argument("--trade", action="store_true",
+                        help="place $1 PRACTICE binaries (default: paper log only)")
+    args = parser.parse_args()
+    if args.minutes <= 0:
+        parser.error("--minutes must be positive")
+
+    import socket
+
+    global _LOCK_SOCK
+    stop_event = threading.Event()
+    watchdog_stop_event = threading.Event()
+    previous_handlers = _install_signal_handlers(stop_event, watchdog_stop_event)
+    client = None
+    open_orders = []
+    log_path = LOGS_DIR / "live_h2.jsonl"
+    try:
+        _load_env()
+        _check_shutdown(stop_event)
+        # This lock coordinates processes on one host only. Account handover
+        # across servers needs an explicit single active host.
+        _LOCK_SOCK = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            _LOCK_SOCK.bind(("127.0.0.1", 47201))
+        except OSError:
+            print("another runner instance holds the lock - exiting cleanly", flush=True)
+            return 0
+
+        from iqoptionapi.stable_api import IQ_Option
+
+        _check_shutdown(stop_event)
+        client = IQ_Option(os.environ["IQ_EMAIL"], os.environ["IQ_PASSWORD"])
+        return _run(args, client, stop_event, watchdog_stop_event, open_orders, log_path)
+    except ShutdownRequested:
+        print("shutdown requested - stopping new decisions and orders", flush=True)
+        return 0
+    finally:
+        # Also stops the hard-exit watchdog during reconciliation. Already
+        # running broker calls cannot be force-cancelled safely in Python.
+        watchdog_stop_event.set()
+        try:
+            if client is not None:
+                try:
+                    settle_open_orders(client, open_orders, log_path,
+                                       stop_event=stop_event)
+                finally:
+                    stop_event.set()
+                    _close_client(client)
+        finally:
+            stop_event.set()
+            try:
+                if _LOCK_SOCK is not None:
+                    _LOCK_SOCK.close()
+                    _LOCK_SOCK = None
+            finally:
+                for signum, handler in previous_handlers.items():
+                    signal.signal(signum, handler)
+        print(f"runner cleanup complete {datetime.now(timezone.utc).isoformat()}", flush=True)
 
 
 if __name__ == "__main__":

@@ -39,10 +39,9 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from runtime_paths import LOGS_DIR, PROJECT_DIR
 
-PROJECT_DIR = Path(__file__).resolve().parent
-OUT_PATH = PROJECT_DIR / "logs" / "execution_probe.jsonl"
+OUT_PATH = LOGS_DIR / "execution_probe.jsonl"
 AMOUNT = 1.0
 EXPIRY_MINUTES = 15
 DEFAULT_ASSET = "EURUSD"
@@ -322,7 +321,7 @@ def _settle(client, call, rows: list[dict]) -> int:
     print(f"settled {settled}/{len(pending)}")
     print(json.dumps(summarize(read_probe_log()), indent=2))
     if not verdicts:
-        dump = PROJECT_DIR / "logs" / "order_records" / "probe_history.json"
+        dump = LOGS_DIR / "order_records" / "probe_history.json"
         dump.parent.mkdir(parents=True, exist_ok=True)
         dump.write_text(json.dumps(history, indent=2, default=str),
                         encoding="utf-8")

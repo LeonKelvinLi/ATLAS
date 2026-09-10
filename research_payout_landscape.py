@@ -17,10 +17,9 @@ import argparse
 import json
 from collections import defaultdict
 from datetime import datetime, timezone
-from pathlib import Path
+from runtime_paths import LOGS_DIR, STATE_DIR
 
-PROJECT_DIR = Path(__file__).resolve().parent
-OUT_PATH = PROJECT_DIR / "logs" / "payout_landscape.json"
+OUT_PATH = LOGS_DIR / "payout_landscape.json"
 
 
 def break_even_wr(payout: float) -> float:
@@ -70,7 +69,7 @@ def main() -> int:
     import duckdb
     from instruments import INSTRUMENTS
 
-    conn = duckdb.connect(str(PROJECT_DIR / "market.duckdb"), read_only=True)
+    conn = duckdb.connect(str(STATE_DIR / "market.duckdb"), read_only=True)
     try:
         rows = conn.execute(
             "SELECT asset, kind, ts_epoch, payout FROM payout_snapshots "
@@ -105,7 +104,7 @@ def main() -> int:
     if under:
         print(f"\nunder-earners in trial universe (mean payout < 0.80): {', '.join(under)}")
 
-    OUT_PATH.parent.mkdir(exist_ok=True)
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(json.dumps({
         "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "semantics": "descriptive payout aggregation; routing decisions are a "

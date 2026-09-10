@@ -18,12 +18,12 @@ it any time, the only cost is one slow run.
 
 import hashlib
 import shutil
-from pathlib import Path
 
 import pandas as pd
 
-PROJECT_DIR = Path(__file__).resolve().parent
-CACHE_DIR = PROJECT_DIR / "cache" / "features"
+from runtime_paths import STATE_DIR
+
+CACHE_DIR = STATE_DIR / "cache" / "features"
 
 
 def signature(candles: pd.DataFrame, asset: str, interval: int, horizon: int,

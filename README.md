@@ -34,6 +34,14 @@ The test suite skips private datasets by default. To explicitly smoke-test a loc
 
 Deployment is intended for a server. This checkout is for development; the offline quickstart installs no startup jobs or application services. See [server readiness](docs/server-readiness.md) before configuring a host.
 
+The Python runtime supports an external state directory via `ATLAS_STATE_DIR`, with separate overrides for models, the environment file, and backups. Inspect the resolved paths without starting an application or creating directories:
+
+```bash
+uv run --locked python runtime_paths.py
+```
+
+The supervisor requires an explicit `--mode paper` or `--mode practice` (`--paper` remains an alias). These are future runtime choices, not part of the offline quickstart. Watchdog recovery and dashboard startup are also opt-in. Server process management and deployment remain unconfigured.
+
 ## What is in the repository
 
 | Component | Entry points | Purpose |

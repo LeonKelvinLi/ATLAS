@@ -36,7 +36,9 @@ def load_key() -> str | None:
     key = os.environ.get("PERPLEXITY_API_KEY")
     if key:
         return key.strip()
-    env = PROJECT_DIR / ".env"
+    from runtime_paths import ENV_FILE
+
+    env = ENV_FILE
     if env.exists():
         for line in env.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()

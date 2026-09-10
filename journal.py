@@ -10,7 +10,9 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent / "journal.db"
+from runtime_paths import STATE_DIR
+
+DB_PATH = STATE_DIR / "journal.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -36,6 +38,8 @@ CREATE TABLE IF NOT EXISTS runs (
 
 
 def open_journal(path: Path = DB_PATH) -> sqlite3.Connection:
+    if str(path) != ":memory:":
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute(SCHEMA)
     conn.commit()

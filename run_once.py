@@ -11,12 +11,11 @@ import os
 import sys
 import threading
 import time
-from pathlib import Path
 
 from analyzer import ASSET, STRATEGY_VERSION, TF_INTERVALS, decide
 from journal import open_journal, record_run
+from runtime_paths import ENV_FILE, load_env_file
 
-PROJECT_DIR = Path(__file__).resolve().parent
 TRADE_AMOUNT = 1.0
 CANDLE_COUNT = 120
 
@@ -46,13 +45,7 @@ def _call(fn, *args, timeout=60, **kwargs):
 
 
 def _load_env() -> None:
-    env_file = PROJECT_DIR / ".env"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                os.environ.setdefault(key.strip(), value.strip())
+    load_env_file(ENV_FILE)
 
 
 def main() -> int:

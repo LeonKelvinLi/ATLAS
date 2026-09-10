@@ -1,9 +1,15 @@
-# Running ATLAS on Windows (always-on)
+# Legacy Windows host notes
 
-The whole pipeline is portable Python; the only Mac-specific parts (launchd,
-zsh scripts) are replaced by `supervisor.py` + Windows Task Scheduler.
-A home Windows desktop is an ideal host: always-on, home IP (no
-datacenter-flag risk that a cloud VM would carry).
+These notes describe the earlier Windows desktop setup. The current plan is
+to run ATLAS on a server; read [server readiness](docs/server-readiness.md)
+before choosing or configuring that host. No services have been installed
+by the current development work.
+
+Compatibility update: the supervisor now requires an explicit mode. Runtime
+data paths can live outside the checkout, backups require an explicit
+destination, and watchdog recovery/dashboard startup require opt-in flags.
+The examples below are historical setup instructions, not a verified server
+deployment recipe.
 
 ## Prerequisites (one time)
 
@@ -65,7 +71,7 @@ PowerShell **as Administrator**, edit the path if you cloned elsewhere):
 ```powershell
 $py  = "$HOME\ATLAS\.venv\Scripts\python.exe"
 $dir = "$HOME\ATLAS"
-$action  = New-ScheduledTaskAction -Execute $py -Argument "supervisor.py" -WorkingDirectory $dir
+$action  = New-ScheduledTaskAction -Execute $py -Argument "supervisor.py --mode paper" -WorkingDirectory $dir
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 2) `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
@@ -73,8 +79,9 @@ Register-ScheduledTask -TaskName "ATLAS-supervisor" -Action $action -Trigger $tr
     -Settings $settings -Description "ATLAS always-on collector + trader"
 Start-ScheduledTask -TaskName "ATLAS-supervisor"
 ```
-(`supervisor.py` runs with `--trade` by default. For a paper-only host,
-append `--paper` to the `-Argument` above.)
+The example explicitly chooses paper mode. PRACTICE orders require the
+separate `--mode practice` choice after the host and artifacts have been
+verified. An invocation without a mode now exits before starting workers.
 
 Check it: **Task Scheduler → Task Scheduler Library → ATLAS-supervisor**, or
 `Get-ScheduledTask ATLAS-supervisor`. Stop with

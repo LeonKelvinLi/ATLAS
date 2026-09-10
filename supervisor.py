@@ -1,43 +1,44 @@
-"""Portable always-on supervisor - one process replacing launchd + the zsh
-scripts. Runs identically on Windows, macOS and Linux.
+"""Portable supervisor for explicitly selected paper or practice operation.
 
-Two responsibilities, forever:
-  COLLECT  once at start and every ~60 min: fetch candles for every
-           registered instrument + a payout snapshot (what collect_cycle.sh
-           did, in Python).
-  TRADE    keep a single live_h2_runner session alive continuously,
-           restarting it whenever it exits (the 57-min reconnect design, or
-           a crash bail). The runner's own socket lock guarantees exactly
-           one trader even if this supervisor is accidentally double-run.
+Run with ``--mode paper`` to collect candles and log signals, or explicitly
+select ``--mode practice`` to let the runner place demo-account orders.
+``--paper`` remains an alias for ``--mode paper``. No mode is selected by
+default. Choosing a mode does not validate model artifacts or authorize a
+second host to use an account already running elsewhere.
 
-Launch it with the platform's startup mechanism and never think about it:
-  Windows  Task Scheduler at logon, "restart on failure" (see WINDOWS_SETUP.md)
-  macOS    launchd, or just `caffeinate -i python supervisor.py`
-  Linux    systemd, or nohup
-
-Flags:
-  --paper        run the trader WITHOUT --trade (log signals, place nothing)
-  --collect-min  minutes between collection cycles (default 60)
+Collection runs in the background without overlapping cycles. The runner
+restarts with a bounded backoff after short sessions. SIGTERM and SIGINT
+stop both types of child process and release the local singleton lock.
 """
 
 import argparse
+import signal
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 from instruments import INSTRUMENTS
+from runtime_paths import LOGS_DIR, PROJECT_DIR
 
-PROJECT_DIR = Path(__file__).resolve().parent
-PYTHON = sys.executable  # the venv's interpreter, whatever the OS
-LOG = PROJECT_DIR / "logs"
-# Keep children windowless. Under the S4U scheduled task there is no visible
-# desktop anyway, but run by hand - or if the task is ever re-registered
-# interactively - each collector and runner launch would flash a console.
-# Absent off Windows, so the default is 0.
+PYTHON = sys.executable
+LOG = LOGS_DIR
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+SHORT_RUN_S = 60
+BACKOFF_START_S = 30
+BACKOFF_MAX_S = 300
+LOOP_WAIT_S = 30
+COLLECT_POLL_S = 1
+# The runner needs time to acknowledge a submitted order, reconcile pending
+# IDs and disconnect. Its own bounded cleanup fits within this grace period.
+TERMINATE_WAIT_S = 30
+KILL_WAIT_S = 5
+COLLECT_JOIN_S = 2
+
+SUPERVISOR_LOCK_PORT = 47202  # runner uses 47201
+_LOCK_SOCK = None
 
 
 def _stamp() -> str:
@@ -45,49 +46,168 @@ def _stamp() -> str:
 
 
 def log(msg: str) -> None:
-    LOG.mkdir(exist_ok=True)
+    LOG.mkdir(parents=True, exist_ok=True)
     line = f"[{_stamp()}] {msg}"
     print(line, flush=True)
-    with open(LOG / "supervisor.log", "a") as fh:
+    with open(LOG / "supervisor.log", "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
 
 
-def collect_cycle() -> None:
-    """Candles for all instruments + one payout snapshot. Errors are logged,
-    never fatal - a bad cycle must not stop the supervisor."""
+def _stop_processes(processes) -> None:
+    """Terminate together, then kill/reap stragglers within shared deadlines."""
+    errors = []
+    for process in processes:
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass  # the child exited between poll and terminate
+            except OSError as exc:
+                errors.append(f"child pid={process.pid} terminate failed: {exc}")
+
+    deadline = time.monotonic() + TERMINATE_WAIT_S
+    for process in processes:
+        try:
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            pass
+        except OSError as exc:
+            errors.append(f"child pid={process.pid} wait failed: {exc}")
+
+    for process in processes:
+        if process.poll() is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                errors.append(f"child pid={process.pid} kill failed: {exc}")
+
+    deadline = time.monotonic() + KILL_WAIT_S
+    for process in processes:
+        try:
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            errors.append(f"child pid={process.pid} did not exit within the kill deadline")
+        except OSError as exc:
+            errors.append(f"child pid={process.pid} final wait failed: {exc}")
+    # Cleanup of one child must not prevent attempts to stop the others.
+    for error in errors:
+        log(error)
+
+
+class ChildProcesses:
+    """Track every child, including collectors created by the worker thread."""
+
+    def __init__(self, stop: threading.Event):
+        self.stop = stop
+        self._lock = threading.Lock()
+        self._processes: dict[subprocess.Popen, str] = {}
+
+    def spawn(self, command, *, role="runner", **kwargs):
+        # Synchronize process creation with the shutdown snapshot. A child
+        # already being created when stop arrives is tracked before shutdown
+        # takes the snapshot; subsequent launches are refused.
+        with self._lock:
+            if self.stop.is_set():
+                return None
+            if role == "collector" and any(
+                    child_role == "collector" and child.poll() is None
+                    for child, child_role in self._processes.items()):
+                # A collector can outlive its worker if OS termination/kill
+                # fails. Never replace that process with an overlapping one.
+                return None
+            process = subprocess.Popen(
+                command, cwd=PROJECT_DIR, creationflags=NO_WINDOW, **kwargs)
+            self._processes[process] = role
+            return process
+
+    def has_running(self, role: str) -> bool:
+        with self._lock:
+            return any(child_role == role and child.poll() is None
+                       for child, child_role in self._processes.items())
+
+    def forget(self, process) -> None:
+        with self._lock:
+            self._processes.pop(process, None)
+
+    def shutdown(self) -> None:
+        self.stop.set()
+        with self._lock:
+            processes = list(self._processes)
+        _stop_processes(processes)
+
+    def close_pipes(self) -> None:
+        """Called only after the collection worker has finished using pipes."""
+        with self._lock:
+            processes = list(self._processes)
+        for process in processes:
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+
+
+def _collect_command(children: ChildProcesses, command, timeout: float):
+    process = children.spawn(
+        command, role="collector", stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True)
+    if process is None:
+        return None
+    deadline = time.monotonic() + timeout
+    try:
+        while not children.stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=min(COLLECT_POLL_S, remaining))
+                return subprocess.CompletedProcess(
+                    command, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue
+        # The main thread owns shutdown of any still-running child. Keep it
+        # registered until then, even though this worker is returning.
+        return None
+    except Exception:
+        if not children.stop.is_set() and process.poll() is None:
+            _stop_processes([process])
+        raise
+    finally:
+        if process.poll() is not None:
+            children.forget(process)
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+
+
+def collect_cycle(children: ChildProcesses) -> None:
+    """Collect candles and payouts without preventing runner supervision."""
     assets = list(INSTRUMENTS)
     try:
-        r = subprocess.run(
+        result = _collect_command(
+            children,
             [PYTHON, "collector.py", "candles", *assets, "--interval", "60", "--hours", "2"],
-            cwd=PROJECT_DIR, capture_output=True, text=True, timeout=1200,
-            creationflags=NO_WINDOW,
+            timeout=1200,
         )
-        log(f"collect candles exit={r.returncode}"
-            + ("" if r.returncode == 0 else f" stderr={r.stderr[-200:]}"))
-        r2 = subprocess.run(
-            [PYTHON, "collector.py", "payouts"],
-            cwd=PROJECT_DIR, capture_output=True, text=True, timeout=300,
-            creationflags=NO_WINDOW,
-        )
-        log(f"collect payouts exit={r2.returncode}")
+        if result is None or children.stop.is_set():
+            return
+        log(f"collect candles exit={result.returncode}"
+            + ("" if result.returncode == 0 else f" stderr={result.stderr[-200:]}"))
+        result = _collect_command(
+            children, [PYTHON, "collector.py", "payouts"], timeout=300)
+        if result is not None:
+            log(f"collect payouts exit={result.returncode}")
     except Exception as exc:
         log(f"collect cycle error: {type(exc).__name__}: {exc}")
 
 
-SUPERVISOR_LOCK_PORT = 47202  # runner uses 47201
-_LOCK_SOCK = None  # bound for the process lifetime in main()
-
-
 def acquire_singleton_lock(port: int = SUPERVISOR_LOCK_PORT):
-    """Bind a localhost port for the process lifetime, or return None.
+    """Hold a localhost port until shutdown, or return None if it is held.
 
-    The runner has had this since the fcntl->socket port; the supervisor never
-    did, and 2026-07-29 showed why it needs one. Task Scheduler can lose track
-    of a running supervisor (a `schtasks /run` that IgnoreNew rejects leaves
-    the task 'Ready' while the real process keeps going), after which any
-    recovery attempt - including watchdog.py's - would start a SECOND
-    supervisor. Two supervisors mean duplicate collection and runner churn.
-    The OS releases this on exit or crash, so there is no stale lockfile."""
+    This coordinates processes on this host only. A server migration also
+    needs an explicit handover from any other host using the same account.
+    """
     import socket
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -99,91 +219,105 @@ def acquire_singleton_lock(port: int = SUPERVISOR_LOCK_PORT):
     return sock
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--paper", action="store_true",
-                    help="run the trader without --trade (log only, place nothing)")
-    ap.add_argument("--collect-min", type=int, default=60)
-    args = ap.parse_args()
+def _positive_minutes(value: str) -> int:
+    minutes = int(value)
+    if minutes <= 0:
+        raise argparse.ArgumentTypeError("collection interval must be positive")
+    return minutes
 
-    # Refuse to be the second supervisor. Held for the process lifetime.
+
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--mode", choices=("paper", "practice"),
+                      help="paper logs signals; practice enables demo orders")
+    mode.add_argument("--paper", dest="mode", action="store_const", const="paper",
+                      help="alias for --mode paper")
+    ap.add_argument("--collect-min", type=_positive_minutes, default=60)
+    args = ap.parse_args(argv)
+
+    # Parse before even acquiring the lock or writing a log. An unconfigured
+    # service must fail visibly instead of silently selecting demo trading.
     global _LOCK_SOCK
     _LOCK_SOCK = acquire_singleton_lock()
     if _LOCK_SOCK is None:
         log("another supervisor already holds the lock - exiting cleanly")
         return
 
-    log(f"supervisor start (python={PYTHON}, trade={'off' if args.paper else 'on'})")
-    last_collect = 0.0
-    runner = None
-    runner_cmd = [PYTHON, "live_h2_runner.py", "--minutes", "57"]
-    if not args.paper:
-        runner_cmd.append("--trade")
-
-    # Backoff for a runner that dies immediately. The commonest cause is the
-    # single-instance socket lock still held by a stray process from a
-    # previous generation: the new runner exits cleanly within a second, and
-    # without backoff this loop respawns it every 30s indefinitely, churning
-    # the broker connection and burying real events in log spam
-    # (observed 2026-07-28).
-    SHORT_RUN_S = 60
-    BACKOFF_START_S = 30
-    BACKOFF_MAX_S = 300
-    backoff = BACKOFF_START_S
-    launched_at = 0.0
-
+    stop = threading.Event()
+    children = ChildProcesses(stop)
+    previous_handlers = {}
     collector_thread: threading.Thread | None = None
 
+    def request_stop(signum, frame):
+        # No logging, waiting, or process cleanup from inside a handler.
+        stop.set()
+
     try:
-        while True:
-            now = time.time()
-            # Collection on schedule, in the BACKGROUND.
-            #
-            # 2026-07-28: collect_cycle ran inline with a 1200s subprocess
-            # timeout. A hung collector therefore froze this loop for twenty
-            # minutes, during which a wedged runner could not be relaunched -
-            # turning a runner hang into a 74-minute trading outage. Keeping
-            # the trader alive outranks collecting candles, and a missed
-            # collection is repaired by catchup_gaps within hours, whereas a
-            # missed trading minute is gone for good.
-            if now - last_collect >= args.collect_min * 60:
-                if collector_thread is not None and collector_thread.is_alive():
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, request_stop)
+
+        log(f"supervisor start (python={PYTHON}, mode={args.mode}, "
+            f"trade={'on' if args.mode == 'practice' else 'off'})")
+        last_collect = None
+        runner = None
+        runner_cmd = [PYTHON, "live_h2_runner.py", "--minutes", "57"]
+        if args.mode == "practice":
+            runner_cmd.append("--trade")
+        backoff = BACKOFF_START_S
+        launched_at = 0.0
+
+        while not stop.is_set():
+            now = time.monotonic()
+            if last_collect is None or now - last_collect >= args.collect_min * 60:
+                if ((collector_thread is not None and collector_thread.is_alive())
+                        or children.has_running("collector")):
                     log("previous collection still running - skipping this "
                         "cycle (catchup_gaps will heal any hole)")
-                    last_collect = now
                 else:
                     collector_thread = threading.Thread(
-                        target=collect_cycle, daemon=True)
+                        target=collect_cycle, args=(children,), daemon=True)
                     collector_thread.start()
-                    last_collect = now
-            # Keep exactly one trader alive.
+                last_collect = now
+
             if runner is None or runner.poll() is not None:
                 if runner is not None:
+                    children.forget(runner)
                     lived = now - launched_at
                     log(f"runner exited ({runner.returncode}) after "
                         f"{lived:.0f}s; relaunching")
                     if lived < SHORT_RUN_S:
                         log(f"  short run - backing off {backoff:.0f}s "
                             "(stray lock holder?)")
-                        time.sleep(backoff)
+                        if stop.wait(backoff):
+                            break
                         backoff = min(backoff * 2, BACKOFF_MAX_S)
                     else:
-                        backoff = BACKOFF_START_S   # healthy session, reset
-                runner = subprocess.Popen(runner_cmd, cwd=PROJECT_DIR,
-                                          creationflags=NO_WINDOW)
-                launched_at = time.time()
-                log(f"runner launched pid={runner.pid}")
-            time.sleep(30)
+                        backoff = BACKOFF_START_S
+                runner = children.spawn(runner_cmd)
+                if runner is not None:
+                    launched_at = time.monotonic()
+                    log(f"runner launched pid={runner.pid}")
+            stop.wait(LOOP_WAIT_S)
     except KeyboardInterrupt:
-        log("supervisor stopping (KeyboardInterrupt)")
+        # Also handle explicit KeyboardInterrupt from embedding callers.
+        stop.set()
     finally:
-        if runner is not None and runner.poll() is None:
-            runner.terminate()
-            try:
-                runner.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                runner.kill()
-        log("supervisor stopped")
+        try:
+            children.shutdown()
+            if collector_thread is not None:
+                collector_thread.join(timeout=COLLECT_JOIN_S)
+                if collector_thread.is_alive():
+                    log("collection worker did not finish within the join deadline")
+                else:
+                    children.close_pipes()
+            log("supervisor stopped")
+        finally:
+            _LOCK_SOCK.close()
+            _LOCK_SOCK = None
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
 
 
 if __name__ == "__main__":

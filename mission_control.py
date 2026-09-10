@@ -22,13 +22,14 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-PROJECT_DIR = Path(__file__).resolve().parent
-LOGS = PROJECT_DIR / "logs"
+from runtime_paths import LOGS_DIR, MODELS_DIR, STATE_DIR
+
+LOGS = LOGS_DIR
 HEARTBEAT_PATH = LOGS / "live_h2_heartbeat.jsonl"
 SIGNALS_PATH = LOGS / "live_h2.jsonl"
 SUPERVISOR_LOG = LOGS / "supervisor.log"
-MARKET_DB = PROJECT_DIR / "market.duckdb"
-JOURNAL_DB = PROJECT_DIR / "journal.db"
+MARKET_DB = STATE_DIR / "market.duckdb"
+JOURNAL_DB = STATE_DIR / "journal.db"
 TASK_NAME = "ATLAS-supervisor"
 
 EXPIRY_S = 15 * 60          # matches live_h2_runner EXPIRY_MINUTES
@@ -123,7 +124,7 @@ def frozen_universe() -> set[str]:
     and is picked up automatically."""
     global _UNIVERSE_CACHE
     try:
-        paths = sorted((PROJECT_DIR / "models").glob("h2-*.pkl"))
+        paths = sorted(MODELS_DIR.glob("h2-*.pkl"))
         if not paths:
             return set()
         path = paths[-1]
@@ -350,7 +351,7 @@ def journal_counts() -> dict:
     if not JOURNAL_DB.exists():
         return {"exists": False}
     try:
-        conn = sqlite3.connect(f"file:{JOURNAL_DB.as_posix()}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"{JOURNAL_DB.resolve().as_uri()}?mode=ro", uri=True)
         try:
             n = conn.execute("SELECT count(*) FROM runs").fetchone()[0]
         finally:

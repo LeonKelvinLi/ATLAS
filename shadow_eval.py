@@ -26,8 +26,9 @@ import argparse
 import json
 from pathlib import Path
 
-PROJECT_DIR = Path(__file__).resolve().parent
-CROSS_PATH = PROJECT_DIR / "logs" / "cross_section.jsonl"
+from runtime_paths import LOGS_DIR, STATE_DIR
+
+CROSS_PATH = LOGS_DIR / "cross_section.jsonl"
 HORIZON_BARS = 15
 
 
@@ -138,7 +139,7 @@ def main() -> int:
     import duckdb
 
     from instruments import INSTRUMENTS
-    conn = duckdb.connect(str(PROJECT_DIR / "market.duckdb"), read_only=True)
+    conn = duckdb.connect(str(STATE_DIR / "market.duckdb"), read_only=True)
     labels: dict[tuple[str, int], float] = {}
     try:
         for asset, spec in INSTRUMENTS.items():

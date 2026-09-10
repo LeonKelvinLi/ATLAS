@@ -27,11 +27,10 @@ import json
 import re
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
+from runtime_paths import LOGS_DIR
 
-PROJECT_DIR = Path(__file__).resolve().parent
-LOG_PATH = PROJECT_DIR / "logs" / "collector.log"
-HEALTH_PATH = PROJECT_DIR / "logs" / "health.json"
+LOG_PATH = LOGS_DIR / "collector.log"
+HEALTH_PATH = LOGS_DIR / "health.json"
 
 PAYOUT_MAX_AGE_S = 7200      # must match train.py --payout-max-age default
 COVERAGE_WINDOW_H = 48
@@ -211,7 +210,7 @@ def main() -> int:
         int(datetime.now(timezone.utc).timestamp()),
         current_cycle_status=args.current_cycle_status,
     )
-    HEALTH_PATH.parent.mkdir(exist_ok=True)
+    HEALTH_PATH.parent.mkdir(parents=True, exist_ok=True)
     HEALTH_PATH.write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
     return 0 if report["healthy"] else 1

@@ -17,7 +17,9 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-DB_PATH = Path(__file__).resolve().parent / "market.duckdb"
+from runtime_paths import STATE_DIR
+
+DB_PATH = STATE_DIR / "market.duckdb"
 SOURCE = "iqoptionapi-websocket"
 
 CANDLE_FIELDS = ("from_ts", "to_ts", "open", "high", "low", "close", "volume")
@@ -62,6 +64,8 @@ CREATE TABLE IF NOT EXISTS payout_snapshots (
 
 
 def open_db(path: Path = DB_PATH) -> duckdb.DuckDBPyConnection:
+    if str(path) != ":memory:":
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(path))
     conn.execute(SCHEMA)
     # Migrate pre-hash databases in place.

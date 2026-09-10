@@ -8,33 +8,25 @@ Safety model:
   - Any order-placing/closing tool refuses to act on the REAL balance unless
     IQ_ALLOW_REAL=1 is set in the environment / .env file.
 
-Credentials go in a .env file next to this script (see .env.example).
+Credentials come from ATLAS_ENV_FILE, or .env in ATLAS_STATE_DIR when unset
+(see .env.example). The state directory defaults to this script's directory.
 """
 
 import difflib
 import os
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-PROJECT_DIR = Path(__file__).resolve().parent
-ENV_FILE = PROJECT_DIR / ".env"
+from runtime_paths import ENV_FILE, load_env_file
 
 CALL_TIMEOUT = 30  # seconds; the underlying library busy-waits forever on lost replies
 
 
 def _load_env() -> None:
-    if not ENV_FILE.exists():
-        return
-    for line in ENV_FILE.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip())
+    load_env_file(ENV_FILE)
 
 
 _load_env()

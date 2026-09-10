@@ -50,8 +50,10 @@ def main() -> None:
         "data_end_ts": int(pooled["to_ts"].max()),
         "built_utc": datetime.now(timezone.utc).isoformat(),
     }
-    out_dir = Path(__file__).resolve().parent / "models"
-    out_dir.mkdir(exist_ok=True)
+    from runtime_paths import MODELS_DIR
+
+    out_dir = MODELS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     path = out_dir / f"{meta['hypothesis']}-{stamp}.pkl"
     with open(path, "wb") as fh:

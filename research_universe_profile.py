@@ -18,10 +18,9 @@ Usage: python research_universe_profile.py
 import json
 import math
 from datetime import datetime, timezone
-from pathlib import Path
+from runtime_paths import LOGS_DIR, STATE_DIR
 
-PROJECT_DIR = Path(__file__).resolve().parent
-OUT_PATH = PROJECT_DIR / "logs" / "universe_profile.json"
+OUT_PATH = LOGS_DIR / "universe_profile.json"
 
 EXTRA = ["SpaceX-OTC", "SpaceX-op", "SP500-OTC", "US30-OTC",
          "USNDAQ100-OTC", "UK100-OTC"]
@@ -70,7 +69,7 @@ def series_stats(closes: list[float], to_ts: list[int]) -> dict:
 def main() -> int:
     import duckdb
 
-    conn = duckdb.connect(str(PROJECT_DIR / "market.duckdb"), read_only=True)
+    conn = duckdb.connect(str(STATE_DIR / "market.duckdb"), read_only=True)
     profile = {}
     try:
         for asset in EXTRA + REFERENCE:
@@ -109,7 +108,7 @@ def main() -> int:
               f"{100*s['flat_bar_share']:>5.1f}% {s['gaps_gt_1m']:>5d} "
               f"{str(s['peak_trough_activity_ratio']):>6s}")
 
-    OUT_PATH.parent.mkdir(exist_ok=True)
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(json.dumps({
         "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "semantics": "structure-only profile; performance claims require a "

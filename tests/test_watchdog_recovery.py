@@ -54,3 +54,43 @@ def test_restart_does_not_kill_processes():
     assert "/end" in body and "/run" in body
     assert "taskkill" not in body
     assert "Stop-Process" not in body
+
+
+def test_restart_is_unavailable_off_windows_without_running_commands(monkeypatch):
+    import watchdog
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Task Scheduler must not be invoked off Windows")
+
+    monkeypatch.setattr(watchdog.sys, "platform", "linux")
+    monkeypatch.setattr(watchdog.subprocess, "run", forbidden)
+    ok, detail = watchdog.restart_supervisor()
+    assert not ok
+    assert "unavailable" in detail
+    assert "Windows Task Scheduler" in detail
+
+
+def test_windows_restart_uses_task_scheduler_and_reports_failure(monkeypatch):
+    from types import SimpleNamespace
+
+    import watchdog
+
+    calls = []
+    delays = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=int("/run" in command),
+                               stdout="", stderr="fixture failure")
+
+    monkeypatch.setattr(watchdog.sys, "platform", "win32")
+    monkeypatch.setattr(watchdog.subprocess, "run", fake_run)
+    monkeypatch.setattr(watchdog.time, "sleep", delays.append)
+    ok, detail = watchdog.restart_supervisor()
+    assert not ok
+    assert calls == [
+        ["schtasks", "/end", "/tn", watchdog.SUPERVISOR_TASK],
+        ["schtasks", "/run", "/tn", watchdog.SUPERVISOR_TASK],
+    ]
+    assert delays == [5]
+    assert "fixture failure" in detail

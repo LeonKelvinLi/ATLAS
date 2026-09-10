@@ -1,12 +1,15 @@
-"""ATLAS watchdog - runs every 15 min from Task Scheduler (interactive,
-pythonw.exe so no console window). Fast read-only health check; Windows
-toast on CRITICAL, re-alerting at most every 2 h while the condition
-persists, plus one recovery toast when health returns.
+"""ATLAS health watchdog. By default, reports health without starting apps.
+
+Windows toasts alert on CRITICAL, re-alerting at most every 2 h while the
+condition persists, plus one recovery toast when health returns. Task
+Scheduler recovery requires --recover; dashboard spawning independently
+requires --ensure-dashboard. These options do not install scheduled jobs.
 
 State in logs/watchdog_state.json, log in logs/watchdog.log. Never touches
 trading state.
 """
 
+import argparse
 import json
 import socket
 import subprocess
@@ -16,7 +19,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mission_control import LOGS, NO_WINDOW, PROJECT_DIR, build_status
+from mission_control import LOGS, NO_WINDOW, build_status
+from runtime_paths import PROJECT_DIR
 
 STATE_PATH = LOGS / "watchdog_state.json"
 LOG_PATH = LOGS / "watchdog.log"
@@ -25,8 +29,8 @@ DASHBOARD_PORT = 8787
 SUPERVISOR_TASK = "ATLAS-supervisor"
 # Recovery policy. 2026-07-28: the runner wedged mid-cycle, the supervisor
 # waited on a live-but-stuck child forever, and the outage ran 80 minutes
-# because this watchdog could only TOAST. Detection without recovery is not
-# monitoring. Two consecutive CRITICAL checks (~30 min) before acting, so a
+# because this watchdog could only TOAST. When recovery is explicitly enabled,
+# two consecutive CRITICAL checks (~30 min) are required before acting, so a
 # single transient reading never bounces a healthy trader, and at most one
 # attempt per hour so a genuinely broken system is not restart-looped.
 RECOVERY_AFTER_CONSECUTIVE = 2
@@ -49,6 +53,8 @@ def restart_supervisor() -> tuple[bool, str]:
     watchdog does not have, and a half-killed tree is worse than a clean
     retry. If the socket lock is still held by an orphan the new runner exits
     cleanly and the next cycle tries again - visible in the log either way."""
+    if sys.platform != "win32":
+        return False, "unavailable: supervisor recovery requires Windows Task Scheduler"
     try:
         stop = subprocess.run(["schtasks", "/end", "/tn", SUPERVISOR_TASK],
                               capture_output=True, text=True, timeout=60,
@@ -66,7 +72,7 @@ def restart_supervisor() -> tuple[bool, str]:
 
 
 def log(msg: str) -> None:
-    LOGS.mkdir(exist_ok=True)
+    LOGS.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(LOG_PATH, "a", encoding="utf-8") as fh:
         fh.write(f"[{stamp}] {msg}\n")
@@ -75,6 +81,8 @@ def log(msg: str) -> None:
 def toast(title: str, body: str) -> bool:
     """Windows toast via WinRT (no extra packages). Falls back silently -
     the watchdog log always has the event either way."""
+    if sys.platform != "win32":
+        return False
     script = f"""
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
@@ -160,7 +168,7 @@ def load_state() -> dict:
         return {}
 
 
-def _run() -> int:
+def _run(*, recover: bool = False, start_dashboard: bool = False) -> int:
     now = int(time.time())
     status = build_status(now=now, deep=False)
     tier, reasons = status["tier"], status["reasons"]
@@ -181,26 +189,25 @@ def _run() -> int:
             if ok:
                 state["last_alert_ts"] = now
 
-        # ACT, do not just complain.
-        if should_attempt_recovery(consecutive, now,
-                                   int(state.get("last_recovery_ts", 0))):
+        if recover and should_attempt_recovery(
+                consecutive, now, int(state.get("last_recovery_ts", 0))):
             state["last_recovery_ts"] = now
             ok, detail = restart_supervisor()
             log(f"RECOVERY attempted after {consecutive} critical checks "
                 f"({'ok' if ok else 'FAILED'}): {detail}")
             toast("ATLAS recovery attempted",
-                  ("supervisor restarted" if ok else "restart FAILED - "
-                   "a stray process may need an elevated kill")[:180])
+                  ("supervisor restarted" if ok else f"restart FAILED - {detail}")[:180])
     else:
         state["consecutive_critical"] = 0
         if prev_tier == "CRITICAL":
             toast("ATLAS recovered", "health back to " + tier)
             log("recovery alert sent")
 
-    ensure_dashboard()
+    if start_dashboard:
+        ensure_dashboard()
 
     state["tier"] = tier
-    LOGS.mkdir(exist_ok=True)
+    LOGS.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state))
     # Logged last: an exception earlier must not be masked by a tidy line,
     # and the barrier in main() reports the failure instead.
@@ -208,13 +215,24 @@ def _run() -> int:
     return 0
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Exception barrier: the watchdog is the only thing watching the
     trader, and nothing watches the watchdog. A crash here must never be
     silent (pythonw discards tracebacks), so failures are alerted and
     recorded on a best-effort basis and reported through the exit code."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--recover", action="store_true",
+        help="allow Windows Task Scheduler supervisor restarts after persistent "
+             "critical health checks, subject to the recovery cooldown",
+    )
+    parser.add_argument(
+        "--ensure-dashboard", action="store_true",
+        help="allow starting the local dashboard if it is not already serving",
+    )
+    args = parser.parse_args(argv)
     try:
-        return _run()
+        return _run(recover=args.recover, start_dashboard=args.ensure_dashboard)
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}"
         try:

@@ -14,10 +14,9 @@ Data-only; touches no execution or hypothesis code.
 
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from runtime_paths import LOGS_DIR, STATE_DIR
 
-PROJECT_DIR = Path(__file__).resolve().parent
-LOG = PROJECT_DIR / "logs" / "catchup.log"
+LOG = LOGS_DIR / "catchup.log"
 
 MIN_GAP_H = 3.0      # below this the supervisor/sidecar already cover it
 CAP_H = 168.0        # one week - stays well inside the broker's ~60 days
@@ -47,7 +46,7 @@ def plan_catchup(latest_by_asset: dict[str, int | None], now: int,
 
 
 def log(msg: str) -> None:
-    LOG.parent.mkdir(exist_ok=True)
+    LOG.parent.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(LOG, "a", encoding="utf-8") as fh:
         fh.write(f"[{stamp}] {msg}\n")
@@ -66,7 +65,7 @@ def _run() -> int:
     # fine (the next is 6h away, gaps stay healable for ~60 days); dying
     # without a trace is not (audit 2026-07-24).
     try:
-        conn = duckdb.connect(str(PROJECT_DIR / "market.duckdb"),
+        conn = duckdb.connect(str(STATE_DIR / "market.duckdb"),
                               read_only=True)
     except Exception as exc:
         log(f"skipped: market.duckdb busy ({type(exc).__name__}) - "

@@ -14,6 +14,7 @@ Usage: .venv\\Scripts\\python.exe selfcheck.py [--json]
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -22,13 +23,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-PROJECT_DIR = Path(__file__).resolve().parent
+from runtime_paths import BACKUP_DIR, ENV_FILE, MODELS_DIR, PROJECT_DIR, STATE_DIR
 TASKS = ["ATLAS-supervisor", "ATLAS-watchdog", "ATLAS-extra-collect",
          "ATLAS-catchup", "ATLAS-backup"]
 # Suppress the console window Windows would create for each console child
 # (schtasks, git, pytest) when this runs from a windowless host.
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-BACKUP_DIR = Path.home() / "OneDrive" / "Desktop" / "ATLAS-evidence-backup"
 MIN_FREE_GB = 5.0
 BACKUP_MAX_AGE_H = 14.0     # 6h cadence + generous slack
 
@@ -57,6 +57,10 @@ class Report:
 
 
 def check_tasks(rep: Report) -> None:
+    if sys.platform != "win32":
+        rep.warn("service manager", "host service integration is not configured; "
+                 "Windows Task Scheduler checks do not apply")
+        return
     for name in TASKS:
         try:
             out = subprocess.run(
@@ -81,26 +85,35 @@ def check_tasks(rep: Report) -> None:
 
 
 def check_disk(rep: Report) -> None:
-    free_gb = shutil.disk_usage(PROJECT_DIR).free / 1024 ** 3
+    if not STATE_DIR.exists():
+        rep.fail("state directory", f"{STATE_DIR} does not exist")
+        return
+    free_gb = shutil.disk_usage(STATE_DIR).free / 1024 ** 3
     (rep.ok if free_gb >= MIN_FREE_GB else rep.fail)(
         "disk space", f"{free_gb:.1f} GB free")
 
 
 def check_safety(rep: Report) -> None:
-    env = PROJECT_DIR / ".env"
-    if not env.exists():
-        rep.fail("safety .env", "missing - the runner cannot log in")
-        return
-    text = env.read_text(encoding="utf-8", errors="replace")
-    allow_real = re.search(r"^IQ_ALLOW_REAL\s*=\s*(\S+)", text, re.MULTILINE)
-    if not allow_real or allow_real.group(1).strip() != "0":
-        rep.fail("safety IQ_ALLOW_REAL",
-                 f"expected 0, found {allow_real.group(1) if allow_real else 'ABSENT'}")
+    # Match runtime precedence: process environment overrides the selected
+    # .env file. Report presence/status only, never credential values.
+    values = {}
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                values.setdefault(key.strip(), value.strip())
+    values.update(os.environ)
+    if not all(values.get(key, "").strip() for key in ("IQ_EMAIL", "IQ_PASSWORD")):
+        rep.fail("broker credentials", "IQ_EMAIL and IQ_PASSWORD are required")
+    else:
+        rep.ok("broker credentials", "present (values not displayed)")
+    if values.get("IQ_ALLOW_REAL", "0") != "0":
+        rep.fail("safety IQ_ALLOW_REAL", "must be 0")
     else:
         rep.ok("safety IQ_ALLOW_REAL", "0 (real balance refused)")
-    mode = re.search(r"^IQ_DEFAULT_BALANCE\s*=\s*(\S+)", text, re.MULTILINE)
-    if mode and mode.group(1).strip().upper() != "PRACTICE":
-        rep.warn("safety balance mode", f"{mode.group(1)} (expected PRACTICE)")
+    if values.get("IQ_DEFAULT_BALANCE", "PRACTICE").upper() != "PRACTICE":
+        rep.fail("safety balance mode", "must be PRACTICE")
     else:
         rep.ok("safety balance mode", "PRACTICE")
     # The per-order guard must still be in the runner.
@@ -115,7 +128,7 @@ def check_models(rep: Report) -> None:
     cutoff = 1784678400  # 2026-07-22T00:00:00Z
     import pickle  # project's own frozen bundles; the runner loads them hourly
     for pattern in ("h2-*.pkl", "h4-*.pkl", "meta-h3.pkl"):
-        paths = sorted((PROJECT_DIR / "models").glob(pattern))
+        paths = sorted(MODELS_DIR.glob(pattern))
         if not paths:
             rep.fail(f"model {pattern}", "MISSING")
             continue
@@ -159,7 +172,7 @@ def check_models(rep: Report) -> None:
 
 
 def check_database(rep: Report) -> None:
-    db = PROJECT_DIR / "market.duckdb"
+    db = STATE_DIR / "market.duckdb"
     if not db.exists():
         rep.fail("market.duckdb", "MISSING")
         return
@@ -178,13 +191,22 @@ def check_database(rep: Report) -> None:
     finally:
         conn.close()
     now = int(time.time())
-    rep.ok("candles", f"{n:,} rows, newest {(now - int(latest)) // 60} min old")
-    age_h = (now - int(psnap)) / 3600
-    (rep.ok if age_h < 3 else rep.warn)(
-        "payout snapshots", f"{ns:,}, newest {age_h:.1f} h old")
+    if latest is None:
+        rep.warn("candles", "no candles collected")
+    else:
+        rep.ok("candles", f"{n:,} rows, newest {(now - int(latest)) // 60} min old")
+    if psnap is None:
+        rep.warn("payout snapshots", "no payouts collected")
+    else:
+        age_h = (now - int(psnap)) / 3600
+        (rep.ok if age_h < 3 else rep.warn)(
+            "payout snapshots", f"{ns:,}, newest {age_h:.1f} h old")
 
 
 def check_backup(rep: Report) -> None:
+    if BACKUP_DIR is None:
+        rep.warn("backup", "ATLAS_BACKUP_DIR is not configured")
+        return
     if not BACKUP_DIR.exists():
         rep.warn("backup", f"{BACKUP_DIR} does not exist yet")
         return

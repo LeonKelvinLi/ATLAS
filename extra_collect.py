@@ -21,10 +21,9 @@ already captures every quoted key.
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
+from runtime_paths import LOGS_DIR
 
-PROJECT_DIR = Path(__file__).resolve().parent
-LOG = PROJECT_DIR / "logs" / "extra_collect.log"
+LOG = LOGS_DIR / "extra_collect.log"
 
 # Server-confirmed active ids (the vendored constants predate some).
 # NOTE 2026-07-24: the real-feed index actives (USSPX500/US30/USNDAQ100/
@@ -42,7 +41,7 @@ LOOKBACK_HOURS = 4.0  # self-heals a missed cycle
 
 
 def _log(line: str) -> None:
-    LOG.parent.mkdir(exist_ok=True)
+    LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG, "a", encoding="utf-8") as fh:
         fh.write(line + "\n")
     print(line)

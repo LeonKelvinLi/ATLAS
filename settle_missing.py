@@ -31,10 +31,9 @@ Usage: .venv\\Scripts\\python.exe settle_missing.py [--dry-run] [--limit 200]
 import argparse
 import json
 import sys
-from pathlib import Path
+from runtime_paths import LOGS_DIR
 
-PROJECT_DIR = Path(__file__).resolve().parent
-LOG_PATH = PROJECT_DIR / "logs" / "live_h2.jsonl"
+LOG_PATH = LOGS_DIR / "live_h2.jsonl"
 
 
 def find_unsettled(rows: list[dict]) -> list[dict]:
@@ -233,7 +232,7 @@ def main() -> int:
         # Field names inside a position entry are unverified until a real
         # settled order exists. Dump the raw payloads so the true shape is
         # LEARNED rather than lost to a silent miss.
-        dump = PROJECT_DIR / "logs" / "order_records" / "unmatched_history.json"
+        dump = LOGS_DIR / "order_records" / "unmatched_history.json"
         dump.parent.mkdir(parents=True, exist_ok=True)
         dump.write_text(json.dumps({"unmatched": unmatched, "raw": raw},
                                    indent=2, default=str), encoding="utf-8")

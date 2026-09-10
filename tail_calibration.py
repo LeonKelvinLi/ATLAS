@@ -26,9 +26,7 @@ import argparse
 import json
 import random
 from datetime import datetime, timezone
-from pathlib import Path
-
-PROJECT_DIR = Path(__file__).resolve().parent
+from runtime_paths import LOGS_DIR
 # The FX daily rollover. IQ's binary books are shut here, so signals in these
 # hours are scoreable but NOT executable (measured 2026-07-29: 0/214 orders
 # accepted at 20-21Z versus 14/45 elsewhere).
@@ -98,7 +96,7 @@ def main() -> int:
     from mission_control import (candle_ohlc, frozen_universe, read_jsonl,
                                  snapped_expiry_ts, split_signals)
 
-    signals = split_signals(read_jsonl(PROJECT_DIR / "logs" / "live_h2.jsonl"))["signals"]
+    signals = split_signals(read_jsonl(LOGS_DIR / "live_h2.jsonl"))["signals"]
     if not signals:
         print("no signals logged yet")
         return 0

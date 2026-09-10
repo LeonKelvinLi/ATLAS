@@ -30,8 +30,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-PROJECT_DIR = Path(__file__).resolve().parent
-LOGS = PROJECT_DIR / "logs"
+from runtime_paths import LOGS_DIR
+
+LOGS = LOGS_DIR
 
 # Nadex's published rule, used as the reference averaging scheme because it is
 # the only settlement methodology we can actually read. Not an assumption
@@ -115,7 +116,7 @@ def main() -> int:
 
     deadline = args.until_ts or int(time.time() + args.minutes * 60)
     path = log_path(args.asset)
-    LOGS.mkdir(exist_ok=True)
+    LOGS.mkdir(parents=True, exist_ok=True)
     print(f"recording {args.asset} every {args.interval}s until "
           f"{datetime.fromtimestamp(deadline, timezone.utc):%H:%M:%S}Z -> {path}",
           flush=True)

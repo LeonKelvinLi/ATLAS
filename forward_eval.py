@@ -44,7 +44,7 @@ from research_pooled import XS_COLUMNS, add_cross_asset, currencies  # noqa: F40
 from storage import latest_payout_before, load_canonical_history, open_db
 from train import decide_action
 
-PROJECT_DIR = Path(__file__).resolve().parent
+from runtime_paths import LOGS_DIR, MODELS_DIR, PROJECT_DIR
 H2_PRIMARY_MARGIN = 0.03
 # Four pre-registered tests share one forward window; Bonferroni keeps the
 # family-wise error at 5%. H3 is the single primary hypothesis.
@@ -179,7 +179,7 @@ def load_bundle(name: str, cutoff_ts: int | None = None, purge: bool = False):
     data extends past the forward cutoff - a routine retrain after the
     cutoff would otherwise silently train on the forward window and
     invalidate the test with no visible sign (audit finding H1)."""
-    paths = sorted((PROJECT_DIR / "models").glob(name))
+    paths = sorted(MODELS_DIR.glob(name))
     if not paths:
         raise SystemExit(f"missing models/{name}")
     with open(paths[-1], "rb") as fh:
@@ -514,7 +514,7 @@ def _frozen_assets() -> set[str]:
     them (load_bundle); they are the project's own frozen artifacts, not
     third-party input."""
     try:
-        paths = sorted((PROJECT_DIR / "models").glob("h2-*.pkl"))
+        paths = sorted(MODELS_DIR.glob("h2-*.pkl"))
         if not paths:
             return set()
         with open(paths[-1], "rb") as fh:
@@ -526,7 +526,7 @@ def _frozen_assets() -> set[str]:
 def paper_track(horizon: int) -> dict:
     """Score live paper signals against collected candles. Signals were
     emitted before their outcomes existed - no hindsight is possible."""
-    log_path = PROJECT_DIR / "logs" / "live_h2.jsonl"
+    log_path = LOGS_DIR / "live_h2.jsonl"
     if not log_path.exists():
         return {"error": "no logs/live_h2.jsonl yet"}
     signals = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]

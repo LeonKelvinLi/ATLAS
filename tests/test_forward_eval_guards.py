@@ -26,7 +26,7 @@ def test_load_bundle_warning_branch_does_not_raise_nameerror(
     model_dir = tmp_path / "models"
     model_dir.mkdir()
     (model_dir / "meta-h3.pkl").write_bytes(pickle.dumps(expected))
-    monkeypatch.setattr(forward_eval, "PROJECT_DIR", tmp_path)
+    monkeypatch.setattr(forward_eval, "MODELS_DIR", model_dir)
     name, bundle = forward_eval.load_bundle("meta-h3.pkl", 1784678400)
     assert name == "meta-h3.pkl"
     assert bundle == expected
@@ -55,6 +55,7 @@ OPERATIONAL_MODULES = [
     "settle_missing.py", "probe_execution.py", "probe_order_record.py",
     "selfcheck.py", "watchdog.py", "catchup_gaps.py", "extra_collect.py",
     "backup_state.py", "status.py", "dashboard.py",
+    "supervisor.py", "runtime_paths.py",
 ]
 
 
