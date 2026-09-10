@@ -6,7 +6,7 @@ and does not weaken the existing strategy risk checks. Real-money endpoints,
 market orders, sales, transfers, account resets and account-wide cancellation
 are unavailable in this client.
 
-The selected account starts with $100 simulated cash. The controller allows
+The selected account starts with $100 simulated cash. The standard controller allows
 **one BTC/USD limit-buy attempt with a $2 ceiling including a modeled 60 bps fee
 reserve**. Its initial limit is 2% below the observed bid, rounded down using
 current broker price and quantity increments. A moving market can still fill
@@ -71,6 +71,41 @@ Cancellation is recorded before DELETE and is not blindly retried after an
 ambiguous response. An unresolved cancellation requires inspection using the
 same order ID; the controller cannot claim that the account is flat.
 
+## Explicit correction after a confirmed rejection
+
+The first test was refused by the broker. A separate correction command is
+permitted only when the complete original audit proves a known-rejection handler
+was reached, with no submission uncertainty, acknowledgement, broker ID or fill.
+Missing order lookups alone never qualify. The original intent, binding,
+reservation, audit and `HALTED` flag are preserved.
+
+An immutable correction grant in the same journal permits one additional $2
+attempt with a distinct fixed client UUID and at most $4 combined modeled
+reservations. Both old and new IDs must be absent, the account must still be flat
+at $100, and complete activities/history must still match the baseline. The
+correction intent is committed before POST. A crash or uncertain correction
+result allows lookup/cancellation only; there is no third grant or attempt.
+
+The revised price formatter uses a cent-compatible grid for prices above $1,
+while respecting the broker asset increment. This is conservative compatibility
+with the general order guide, not proof of the original rejection cause.
+Future rejections retain the observed HTTP status, bounded numeric provider code
+and a fixed attributed reason category; raw provider messages are not retained.
+[General limit-price rules](https://docs.alpaca.markets/us/docs/orders-at-alpaca).
+
+```text
+uv run --locked python scripts/alpaca_paper_pilot.py corrected-smoke \
+  --config /Users/leon/.config/atlas/alpaca-paper/pilot-config.json
+
+uv run --locked python scripts/alpaca_paper_pilot.py corrected-status \
+  --config /Users/leon/.config/atlas/alpaca-paper/pilot-config.json
+```
+
+`corrected-cancel` reconciles cancellation for that exact correction ID. These
+commands do not reset the initial test or enable ongoing strategy trading.
+The explicit `halt` command permanently revokes an unused correction grant.
+After an intent exists, halt still permits its exact lookup/cancellation.
+
 ## Evidence and limits
 
 Submission and cancellation results must match the immutable symbol, asset ID,
@@ -103,6 +138,18 @@ Provider contracts:
 
 ## Current execution receipt
 
-Implementation verification and the first provider paper smoke are pending.
-The earlier $100 account/API check is recorded in
-[the connection report](alpaca-paper-connection.md).
+The initial implementation passed 1,454 tests, with two existing optional skips,
+in 167.97 seconds. All eight frozen research artifacts were unchanged.
+
+The first broker test on September 10 at 16:15:51 UTC recorded a limit buy for
+0.000026365 BTC at $75,403.2874, with a $1.9999357183348060 modeled reservation.
+The broker rejected it. The old client discarded the error body and exact HTTP
+status, so the specific cause is unavailable. A price-precision mismatch is only
+a hypothesis. Subsequent paper reads returned $100 cash/equity, no positions,
+no orders and no activities. No cancellation was sent because no broker order
+was found. The attempt remains recorded and halted.
+
+Receipts and test output are outside Git in
+`/Users/leon/Desktop/dev/ATLAS-research-evidence/alpaca-paper-pilot-20260910`.
+The corrective test has not yet run. The earlier $100 account/API check is
+recorded in [the connection report](alpaca-paper-connection.md).

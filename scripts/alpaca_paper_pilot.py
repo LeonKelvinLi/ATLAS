@@ -45,7 +45,8 @@ def run_smoke(pilot, *, sleeper=time.sleep):
     except BrokerError as exc:
         # Submission may have reached Alpaca. Recovery never makes another POST.
         submission_error = str(exc)
-        if pilot.status(reconcile=False)["submit_attempts"] == 0:
+        snapshot = pilot.status(reconcile=False)
+        if snapshot.get("active_submit_attempts", snapshot["submit_attempts"]) == 0:
             raise
     try:
         result = pilot.cancel_once()
@@ -57,6 +58,10 @@ def run_smoke(pilot, *, sleeper=time.sleep):
         result = pilot.status()
         result["submission_error"] = submission_error
         result["polling_finished"] = True
+        result["account_reconciled"] = (
+            result.get("open_order_count") == 0 and result.get("unmanaged_order_count") == 0
+            and not result.get("original_order_present_after_correction_grant", False)
+        )
         return result
     finally:
         pilot.halt()
@@ -64,20 +69,26 @@ def run_smoke(pilot, *, sleeper=time.sleep):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("setup", "status", "smoke", "cancel", "halt"))
+    parser.add_argument("action", choices=("setup", "status", "smoke", "cancel", "halt",
+                                           "corrected-smoke", "corrected-status", "corrected-cancel"))
     parser.add_argument("--config", required=True, help="external owner-only 0600 paper selection JSON")
     args = parser.parse_args(argv)
     try:
         selection = load_selection(args.config)
         client = AlpacaPaperClient(key_file=selection["key_file"])
         state_dir = Path.home() / ".config" / "atlas" / "alpaca-paper" / "pilot"
-        pilot = PaperPilot(state_dir, client, selection["expected_account_fingerprint"])
-        if args.action == "smoke":
+        correction = args.action.startswith("corrected-")
+        pilot = PaperPilot(state_dir, client, selection["expected_account_fingerprint"], correction=correction)
+        action = args.action.removeprefix("corrected-")
+        if correction and action == "smoke":
+            pilot.grant_correction()
+        if action == "smoke":
             result = run_smoke(pilot)
         else:
-            result = getattr(pilot, "cancel_once" if args.action == "cancel" else args.action)()
+            result = getattr(pilot, "cancel_once" if action == "cancel" else action)()
         print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
-        if args.action in {"smoke", "cancel"} and not result["completed"]:
+        if action in {"smoke", "cancel"} and (
+                not result["completed"] or not result.get("account_reconciled", True)):
             return 3
         return 0
     except Exception as exc:

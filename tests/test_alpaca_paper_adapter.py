@@ -9,7 +9,7 @@ from uuid import UUID
 import pytest
 
 import atlas.brokers.alpaca_paper as adapter
-from atlas.brokers.alpaca_paper import AlpacaPaperClient, HTTPResponse
+from atlas.brokers.alpaca_paper import AlpacaPaperClient, AlpacaPaperRejected, HTTPResponse
 from atlas.domain import BrokerError, BrokerRejected, UnknownSubmission
 
 NOW = 1789053228
@@ -346,3 +346,79 @@ def test_key_permissions_and_identifier_validation_precede_http(key_file):
         with pytest.raises(BrokerError):
             fn("not-a-uuid")
     assert t.calls == []
+
+
+@pytest.mark.parametrize("status,code,message,reason", [
+    (422, 42210000, "invalid limit_price 290.123. sub-penny increment does not fulfill minimum pricing criteria", "price_precision"),
+    (422, 42210000, "qty must satisfy quantity precision and increment", "quantity_precision"),
+    (422, 42210000, "order notional must be at least 1 USD", "minimum_order"),
+    (403, 40310000, "account trading is blocked by account permission", "account_permission"),
+    (429, 42910000, "too many requests", "rate_limit"),
+    (403, 40310000, "insufficient buying power", "other"),
+])
+def test_rejection_keeps_http_numeric_code_and_fixed_attributed_hint_only(key_file, status, code, message, reason):
+    payload = {"code": code, "message": message, "untrusted_extra": SECRET}
+    c, t = client(key_file, HTTPResponse(status, json.dumps(payload).encode()))
+    with pytest.raises(AlpacaPaperRejected) as error:
+        c.submit_limit_buy(CLIENT, "0.00001", "100000")
+    rejected = error.value
+    assert isinstance(rejected, BrokerRejected)
+    assert rejected.http_status == status and rejected.provider_code == code
+    assert rejected.reason_code == reason
+    assert str(rejected) == "paper_broker_rejected_request"
+    diagnostic = rejected.diagnostic()
+    assert diagnostic["provider_message_retained"] is False
+    assert diagnostic["reason_basis"] == ("unavailable" if reason == "other" else "provider_message_hint")
+    exposed = json.dumps(diagnostic) + str(rejected) + repr(rejected) + repr(rejected.__dict__)
+    assert SECRET not in exposed and message not in exposed
+    assert len(t.calls) == 1
+
+
+@pytest.mark.parametrize("code", [True, "42210000", 40310000, 422100000000, {"secret": SECRET}, None])
+def test_rejection_code_requires_bounded_numeric_matching_http_family(key_file, code):
+    c, _ = client(key_file, HTTPResponse(422, json.dumps({"code": code, "message": SECRET}).encode()))
+    with pytest.raises(AlpacaPaperRejected) as error:
+        c.submit_limit_buy(CLIENT, "0.00001", "100000")
+    assert error.value.http_status == 422 and error.value.provider_code is None
+    assert error.value.reason_code == "other"
+    assert SECRET not in json.dumps(error.value.diagnostic())
+
+
+@pytest.mark.parametrize("body", [b"", b"not-json", b'{"code":NaN}', b'{"code":42210000,"code":42210001}', b"x" * 4097])
+def test_bad_rejection_body_does_not_erase_known_http_status(key_file, body):
+    c, t = client(key_file, HTTPResponse(422, body))
+    with pytest.raises(AlpacaPaperRejected) as error:
+        c.submit_limit_buy(CLIENT, "0.00001", "100000")
+    assert error.value.diagnostic() == {
+        "http_status": 422, "provider_code": None, "reason_code": "other",
+        "reason_basis": "unavailable", "provider_message_retained": False}
+    assert len(t.calls) == 1
+
+
+def test_owned_http_preserves_numeric_rejection_diagnostics_without_retry(key_file, monkeypatch):
+    message = "invalid limit_price 290.123. sub-penny increment does not fulfill minimum pricing criteria"
+    response = Response(json.dumps({"code": 42210000, "message": message}).encode(), status=422)
+    calls, connections = own_transport(monkeypatch, [response])
+    c = AlpacaPaperClient(key_file, clock=lambda: NOW)
+    with pytest.raises(AlpacaPaperRejected) as error:
+        c.submit_limit_buy(CLIENT, "0.00001", "100000")
+    assert error.value.provider_code == 42210000 and error.value.reason_code == "price_precision"
+    assert len(calls) == 1 and connections[0].closed
+
+
+@pytest.mark.parametrize("failure", ["timeout", "oversized", "length_mismatch"])
+def test_owned_http_body_failure_keeps_observed_rejection_status(key_file, monkeypatch, failure):
+    class FailingResponse(Response):
+        def read1(self, count):
+            if failure == "timeout":
+                raise TimeoutError(SECRET)
+            return super().read1(count)
+    response = FailingResponse(b"{}", status=403, length="4097" if failure == "oversized" else "3")
+    calls, connections = own_transport(monkeypatch, [response])
+    c = AlpacaPaperClient(key_file, clock=lambda: NOW)
+    with pytest.raises(AlpacaPaperRejected) as error:
+        c.submit_limit_buy(CLIENT, "0.00001", "100000")
+    assert error.value.http_status == 403 and error.value.provider_code is None
+    assert error.value.reason_code == "other"
+    assert SECRET not in repr(error.value.__dict__)
+    assert len(calls) == 1 and connections[0].closed

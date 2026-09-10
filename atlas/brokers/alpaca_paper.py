@@ -29,6 +29,7 @@ ORDERS_PATH = "/v2/orders?status=all&limit=500&direction=asc&nested=false"
 QUOTE_PATH = "/v1beta3/crypto/us/latest/quotes?symbols=BTC%2FUSD"
 TIMEOUT_SECONDS = 10
 MAX_RESPONSE_BYTES = 1_000_000
+MAX_REJECTION_BYTES = 4096
 MAX_QUOTE_AGE_SECONDS = 30
 MAX_ORDER_WITH_MODELED_FEES = Decimal("10")
 MODELED_FEE_BPS = Decimal("60")
@@ -39,6 +40,59 @@ STATUSES = TERMINAL_STATUSES | frozenset({
     "stopped", "suspended", "calculated", "held",
 })
 _CLEAR_REJECTIONS = frozenset({400, 401, 403, 422, 429})
+_REJECTION_REASONS = frozenset({"price_precision", "quantity_precision", "minimum_order",
+                                "account_permission", "rate_limit", "other"})
+
+
+class AlpacaPaperRejected(BrokerRejected):
+    """Observed HTTP refusal with closed diagnostic fields and no provider text."""
+
+    def __init__(self, http_status, *, provider_code=None, reason_code="other", reason_basis="unavailable"):
+        if type(http_status) is not int or http_status not in _CLEAR_REJECTIONS:
+            raise ValueError("invalid paper rejection HTTP status")
+        self.http_status = http_status
+        # Accept only bounded numeric codes belonging to the observed status
+        # family. Their provider meaning is not inferred from the number.
+        self.provider_code = (provider_code if type(provider_code) is int
+                              and http_status * 100000 <= provider_code < (http_status + 1) * 100000 else None)
+        self.reason_code = reason_code if reason_code in _REJECTION_REASONS else "other"
+        self.reason_basis = reason_basis if reason_basis in {"provider_message_hint", "http_status", "unavailable"} else "unavailable"
+        super().__init__("paper_broker_rejected_request")
+
+    def diagnostic(self):
+        return {"http_status": self.http_status, "provider_code": self.provider_code,
+                "reason_code": self.reason_code, "reason_basis": self.reason_basis,
+                "provider_message_retained": False}
+
+
+def _rejection(status, body):
+    code, message = None, None
+    if isinstance(body, bytes) and 0 < len(body) <= MAX_REJECTION_BYTES:
+        try:
+            parsed = _json(body)
+            if isinstance(parsed, dict):
+                code = parsed.get("code")
+                value = parsed.get("message")
+                if isinstance(value, str) and len(value) <= 2048 and value.isascii():
+                    message = value.lower()
+        except BrokerError:
+            pass
+    reason, basis = ("rate_limit", "http_status") if status == 429 else ("other", "unavailable")
+    # These are attributed message hints, not verified root causes. Only fixed
+    # enums leave this function; untrusted text never becomes instructions.
+    patterns = (
+        ("price_precision", r"(?:price|sub[- ]penny).*(?:precision|increment|decimal)|sub[- ]penny"),
+        ("quantity_precision", r"(?:qty|quantity).*(?:precision|increment|decimal)"),
+        ("minimum_order", r"(?:minimum|min ).*(?:order|notional|qty|quantity)|(?:order|notional|qty|quantity).*(?:minimum|at least)"),
+        ("account_permission", r"(?:not authorized|unauthorized|permission|trading.*blocked|account.*blocked|not allowed to trade)"),
+        ("rate_limit", r"rate limit|too many requests"),
+    )
+    if message is not None:
+        for label, pattern in patterns:
+            if re.search(pattern, message):
+                reason, basis = label, "provider_message_hint"
+                break
+    return AlpacaPaperRejected(status, provider_code=code, reason_code=reason, reason_basis=basis)
 
 
 def _uuid(value):
@@ -142,6 +196,31 @@ def _endpoint(method, url, body):
     return parsed.netloc, target
 
 
+def _read_body(connection, response, *, deadline, limit):
+    length = response.getheader("Content-Length")
+    if length is not None and (not length.isdigit() or int(length) > limit):
+        raise BrokerError("paper_response_size_invalid")
+    chunks, total = [], 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BrokerError("paper_request_timeout")
+        if connection.sock is not None:
+            connection.sock.settimeout(remaining)
+        chunk = response.read1(min(65536, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            raise BrokerError("paper_response_too_large")
+    if time.monotonic() > deadline:
+        raise BrokerError("paper_request_timeout")
+    if length is not None and total != int(length):
+        raise BrokerError("paper_response_length_mismatch")
+    return b"".join(chunks)
+
+
 def _owned_http(method, url, body, headers, *, timeout_seconds, max_response_bytes):
     host, target = _endpoint(method, url, body)
     connection = http.client.HTTPSConnection(host, timeout=timeout_seconds,
@@ -150,33 +229,23 @@ def _owned_http(method, url, body, headers, *, timeout_seconds, max_response_byt
     try:
         connection.request(method, target, body=body or None, headers=headers)
         response = connection.getresponse()
-        # Do not follow redirects, retry, or read unnecessary error/204 bodies.
+        # An unreadable or malformed error body cannot erase a known refusal.
+        # Its bounded bytes exist in memory only, until closed-field parsing.
+        if response.status in _CLEAR_REJECTIONS:
+            try:
+                rejection_body = _read_body(connection, response, deadline=deadline, limit=MAX_REJECTION_BYTES)
+            except Exception:
+                rejection_body = b""
+            return HTTPResponse(response.status, rejection_body)
+        # Do not follow redirects, retry, or read other error/204 bodies.
         if response.status not in {200, 201}:
             return HTTPResponse(response.status, b"")
-        length = response.getheader("Content-Length")
-        if length is not None and (not length.isdigit() or int(length) > max_response_bytes):
-            raise BrokerError("paper_response_size_invalid")
-        chunks, total = [], 0
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise BrokerError("paper_request_timeout")
-            if connection.sock is not None:
-                connection.sock.settimeout(remaining)
-            chunk = response.read1(min(65536, max_response_bytes + 1 - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > max_response_bytes:
-                raise BrokerError("paper_response_too_large")
-        if time.monotonic() > deadline:
-            raise BrokerError("paper_request_timeout")
-        if length is not None and total != int(length):
-            raise BrokerError("paper_response_length_mismatch")
-        return HTTPResponse(response.status, b"".join(chunks))
+        return HTTPResponse(response.status, _read_body(connection, response, deadline=deadline, limit=max_response_bytes))
     finally:
-        connection.close()
+        try:
+            connection.close()
+        except Exception:
+            pass  # Cleanup cannot erase an already received HTTP response.
 
 
 def _timestamp(value):
@@ -341,7 +410,7 @@ class AlpacaPaperClient:
         if method == "GET" and missing and response.status == 404:
             return None, started, self._now()
         if mutation and response.status in _CLEAR_REJECTIONS:
-            raise BrokerRejected("paper_broker_rejected_request")
+            raise _rejection(response.status, response.body)
         success = 204 if method == "DELETE" else 200
         if response.status != success:
             raise (UnknownSubmission("paper_mutation_acknowledgment_unknown") if mutation

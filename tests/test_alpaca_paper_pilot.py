@@ -13,7 +13,9 @@ from uuid import UUID
 import pytest
 
 from atlas.alpaca_paper_pilot import PaperPilot, PilotError
+from atlas.brokers.alpaca_paper import AlpacaPaperRejected
 from atlas.domain import BrokerError, BrokerRejected, UnknownSubmission
+from atlas.ledger import canonical_json
 from atlas.risk import account_fingerprint
 
 
@@ -95,7 +97,7 @@ class FakeClient:
     def get_order(self, client_id):
         if self.lookup_hook:
             return self.lookup_hook(self, client_id)
-        return deepcopy(self.order)
+        return deepcopy(self.order) if self.order and self.order["client_order_id"] == client_id else None
 
     def submit_limit_buy(self, client_id, quantity, limit_price):
         self.post_calls.append((client_id, quantity, limit_price))
@@ -616,3 +618,335 @@ def test_cli_help_does_not_read_configuration_or_construct_client(capsys, monkey
         cli.main(["--help"])
     assert result.value.code == 0
     assert "smoke" in capsys.readouterr().out
+
+
+def correction_scope(controller, client):
+    return PaperPilot(controller.path, client, FINGERPRINT, clock=lambda: NOW,
+                      allow_test_transport=True, correction=True)
+
+
+def rejected_original(controller, client, *, legacy=False):
+    def refused(*args):
+        raise AlpacaPaperRejected(422, provider_code=42210000, reason_code="price_precision",
+                                  reason_basis="provider_message_hint")
+    client.submit_hook = refused
+    with pytest.raises(AlpacaPaperRejected):
+        controller.submit_once()
+    controller.status()  # Reproduce rejection followed by an absent client-ID lookup.
+    client.submit_hook = None
+    if legacy:
+        # This fixture reproduces old controller records which discarded both
+        # HTTP status and provider reason; do not manufacture either afterward.
+        with sqlite3.connect(controller.db) as conn:
+            for index, encoded in conn.execute("SELECT id,payload FROM events ORDER BY id").fetchall():
+                row = json.loads(encoded)
+                if row["intent"]:
+                    row["intent"].pop("rejection_source", None)
+                    row["intent"].pop("rejection_diagnostic", None)
+                payload = canonical_json(row)
+                conn.execute("UPDATE events SET payload=? WHERE id=?", (payload, index))
+            conn.execute("UPDATE state SET payload=?", (payload,))
+
+
+def audit_rows(controller):
+    with sqlite3.connect("file:" + str(controller.db) + "?mode=ro", uri=True) as conn:
+        return conn.execute("SELECT id,ts,event,payload FROM events ORDER BY id").fetchall()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_correction_grant_preserves_original_audit_binding_intent_and_halt(pilot, legacy):
+    original, client = pilot
+    rejected_original(original, client, legacy=legacy)
+    before, previous_audit = stored(original), audit_rows(original)
+    correction = correction_scope(original, client)
+    report = correction.grant_correction()
+    after = stored(correction)
+    assert correction.client_id != original.client_id
+    assert correction.binding == original.binding == before["binding"]
+    assert after["intent"] == before["intent"]
+    assert audit_rows(original)[:len(previous_audit)] == previous_audit
+    assert report["halted"] is True and original.kill.exists()
+    assert report["intent"] is None and report["active_submit_attempts"] == 0
+    assert report["submit_attempts"] == 1 and report["remaining_submit_attempts"] == 1
+    assert D(report["original_reserved_usd"]) == D(before["intent"]["reserved_usd"])
+    assert report["correction_grant"]["reason_confirmed"] is False
+    evidence = report["correction_grant"]["rejection_evidence"]
+    if legacy:
+        assert evidence == {"kind": "legacy_rejection_handler", "http_status": None,
+                            "provider_code": None, "reason_code": None}
+    else:
+        assert evidence["kind"] == "structured_http_refusal"
+        assert evidence["diagnostic"]["http_status"] == 422
+        assert evidence["diagnostic"]["provider_message_retained"] is False
+    # Re-entering the explicit grant operation does not add another event/grant.
+    again = correction.grant_correction()
+    assert again["correction_grant"] == report["correction_grant"]
+    assert stored(original) == after and len(client.post_calls) == 1
+
+
+def test_granted_correction_consumes_one_distinct_attempt_without_third_or_refill(pilot):
+    original, client = pilot
+    rejected_original(original, client)
+    original_intent = deepcopy(stored(original)["intent"])
+    correction = correction_scope(original, client)
+    correction.grant_correction()
+    report = correction.submit_once()
+    assert len(client.post_calls) == 2
+    assert client.post_calls[0][0] != client.post_calls[1][0]
+    assert report["active_submit_attempts"] == 1 and report["submit_attempts"] == 2
+    assert report["remaining_submit_attempts"] == 0
+    assert D(report["total_reserved_usd_with_modeled_fees"]) <= 4
+    assert stored(original)["intent"] == original_intent
+    assert report["actual_order_fees_usd"] is report["daily_realized_pnl"] is None
+    canceled = correction.cancel_once()
+    reservation = canceled["total_reserved_usd_with_modeled_fees"]
+    resumed = correction_scope(original, client)
+    assert resumed.grant_correction()["remaining_submit_attempts"] == 0
+    assert resumed.submit_once()["total_reserved_usd_with_modeled_fees"] == reservation
+    original.submit_once()
+    assert len(client.post_calls) == 2
+    assert stored(original)["intent"] == original_intent
+    assert original.kill.exists()
+
+
+def test_grant_resume_with_filled_correction_does_not_require_account_reseed(pilot):
+    original, client = pilot
+    rejected_original(original, client)
+    correction = correction_scope(original, client)
+    correction.grant_correction()
+    correction.submit_once()
+    client.order.update(status="filled", filled_qty=client.order["qty"], filled_avg_price="97999")
+    client.account_value.update(cash="98", equity="99.99", non_marginable_buying_power="98")
+    client.position_rows = [{"symbol": "BTC/USD", "qty": client.order["qty"]}]
+    correction.status()
+    before = stored(correction)
+    result = correction_scope(original, client).grant_correction()
+    assert result["completed"] is True
+    assert stored(correction) == before
+    assert client.account_value["cash"] == "98"
+    assert len(client.post_calls) == 2
+
+
+@pytest.mark.parametrize("failure", ["no_attempt", "unknown", "acknowledged", "local_rejection"])
+def test_correction_never_qualifies_from_absence_unknown_acceptance_or_local_refusal(pilot, failure):
+    original, client = pilot
+    if failure == "unknown":
+        def lost(*args):
+            raise UnknownSubmission("synthetic unknown")
+        client.submit_hook = lost
+        with pytest.raises(UnknownSubmission):
+            original.submit_once()
+    elif failure == "acknowledged":
+        original.submit_once()
+        client.order = None
+        client.history = []
+        original.status()
+    elif failure == "local_rejection":
+        def local(*args):
+            raise BrokerRejected("paper_order_terms_invalid")
+        client.submit_hook = local
+        with pytest.raises(BrokerRejected):
+            original.submit_once()
+    before = stored(original)
+    with pytest.raises(PilotError, match="original_rejection_not_proven"):
+        correction_scope(original, client).grant_correction()
+    assert stored(original) == before
+    assert len(client.post_calls) == (0 if failure == "no_attempt" else 1)
+
+
+@pytest.mark.parametrize("changed", ["old_lookup", "correction_lookup", "cash", "history", "activities", "identity"])
+def test_correction_grant_requires_fresh_complete_unchanged_flat_account(pilot, changed):
+    original, client = pilot
+    rejected_original(original, client)
+    correction = correction_scope(original, client)
+    if changed.endswith("lookup"):
+        target = original.client_id if changed == "old_lookup" else correction.client_id
+        client.lookup_hook = lambda fake, identifier: {"client_order_id": target} if identifier == target else None
+    elif changed == "cash":
+        client.account_value["cash"] = "99.99"
+    elif changed == "history":
+        client.history = [{"status": "canceled"}]
+    elif changed == "activities":
+        client.activity_rows = [{"id": "unexplained"}]
+    else:
+        client.account_value["id"] = OTHER_ACCOUNT_ID
+    with pytest.raises(PilotError):
+        correction.grant_correction()
+    assert stored(original).get("correction_grant") is None
+    assert len(client.post_calls) == 1
+
+
+def test_correction_without_grant_cannot_bypass_halt(pilot):
+    original, client = pilot
+    with pytest.raises(PilotError, match="correction_grant_required"):
+        correction_scope(original, client).submit_once()
+    assert client.post_calls == []
+
+
+def test_explicit_halt_revokes_unused_correction_grant_without_erasing_it(pilot):
+    original, client = pilot
+    rejected_original(original, client)
+    correction = correction_scope(original, client)
+    grant = correction.grant_correction()["correction_grant"]
+    original.halt()
+    assert correction.grant_correction()["remaining_submit_attempts"] == 0
+    with pytest.raises(PilotError, match="correction_grant_revoked"):
+        correction.submit_once()
+    assert stored(original)["correction_grant"] == grant
+    assert len(client.post_calls) == 1
+
+
+@pytest.mark.parametrize("event,committed", [
+    ("correction_granted", False), ("correction_granted", True),
+    ("correction_submit_intent_committed", False), ("correction_submit_intent_committed", True),
+    ("correction_submission_acknowledged", False),
+])
+def test_correction_persistence_failures_preserve_claim_and_never_repeat_post(pilot, monkeypatch, event, committed):
+    original, client = pilot
+    rejected_original(original, client)
+    correction = correction_scope(original, client)
+    save = correction._save
+
+    def failing(conn, data, name):
+        if name != event:
+            return save(conn, data, name)
+        if committed:
+            save(conn, data, name)
+        raise PilotError("synthetic correction persistence failure")
+
+    if event != "correction_granted":
+        correction.grant_correction()
+    monkeypatch.setattr(correction, "_save", failing)
+    with pytest.raises(PilotError):
+        if event == "correction_granted":
+            correction.grant_correction()
+        else:
+            correction.submit_once()
+    prior_posts = len(client.post_calls)
+    resumed = correction_scope(original, client)
+    if event == "correction_granted":
+        assert prior_posts == 1
+        resumed.grant_correction()
+        resumed.submit_once()
+        assert len(client.post_calls) == 2
+    elif committed or event == "correction_submission_acknowledged":
+        assert resumed.status(reconcile=False)["active_submit_attempts"] == 1
+        resumed.submit_once()
+        assert len(client.post_calls) == prior_posts
+    else:
+        # No correction intent committed and no POST began. A later explicit
+        # operation may consume that existing one-time grant; it is not a retry.
+        assert prior_posts == 1
+        resumed.submit_once()
+        assert len(client.post_calls) == 2
+    assert len(client.post_calls) <= 2
+    assert stored(original)["intent"]["request"]["client_order_id"] == original.client_id
+
+
+@pytest.mark.parametrize("failure", ["timeout", "process_interrupt", "known_rejection"])
+def test_correction_unknown_or_refusal_is_never_another_grant_or_post(pilot, failure):
+    original, client = pilot
+    rejected_original(original, client)
+    correction = correction_scope(original, client)
+    correction.grant_correction()
+
+    def fail(*args):
+        if failure == "process_interrupt":
+            raise KeyboardInterrupt("synthetic correction interruption")
+        if failure == "known_rejection":
+            raise AlpacaPaperRejected(403, reason_code="account_permission", reason_basis="http_status")
+        raise UnknownSubmission("synthetic correction timeout")
+
+    client.submit_hook = fail
+    with pytest.raises((BrokerError, KeyboardInterrupt)):
+        correction.submit_once()
+    prior = stored(original)
+    resumed = correction_scope(original, client)
+    resumed.grant_correction()
+    report = resumed.submit_once()
+    assert report["remaining_submit_attempts"] == 0 and len(client.post_calls) == 2
+    assert report["submit_attempts"] == 2
+    assert report["total_reserved_usd_with_modeled_fees"] == correction._report(prior)["total_reserved_usd_with_modeled_fees"]
+    if failure == "known_rejection":
+        assert stored(original)["correction_intent"]["rejection_diagnostic"]["http_status"] == 403
+
+
+def test_corrective_account_change_after_durable_claim_blocks_post_forever(pilot):
+    original, client = pilot
+    rejected_original(original, client)
+    correction = correction_scope(original, client)
+    correction.grant_correction()
+    client.quote_hook = lambda fake: fake.activity_rows.append({"id": "intervening-activity"})
+    with pytest.raises(PilotError, match="unexplained_account_activity"):
+        correction.submit_once()
+    assert stored(original)["correction_intent"] is not None
+    assert correction_scope(original, client).submit_once()["remaining_submit_attempts"] == 0
+    assert len(client.post_calls) == 1
+
+
+@pytest.mark.parametrize("increment,allowed", [("0.0001", True), ("0.01", True), ("0.05", True), ("0.003", False), ("0.025", False)])
+def test_conservative_price_grid_respects_both_cent_and_asset_increments(pilot, increment, allowed):
+    controller, client = pilot
+    client.asset_value["price_increment"] = increment
+    client.quote_value.update(bid="75403.2874", ask="75404")
+    if not allowed:
+        with pytest.raises(PilotError, match="price_grids_incompatible"):
+            controller.submit_once()
+        assert client.post_calls == []
+    else:
+        report = controller.submit_once()
+        price = D(report["intent"]["request"]["limit_price"])
+        assert price % D("0.01") == price % D(increment) == 0
+        assert price < D(client.quote_value["bid"])
+
+
+def test_correction_grant_crossing_second_boundary_is_not_spuriously_rejected(pilot):
+    original, client = pilot
+    rejected_original(original, client)
+    correction = correction_scope(original, client)
+    clock = iter([NOW + i * 0.15 for i in range(40)])
+    correction.clock = lambda: next(clock)
+    assert correction.grant_correction()["remaining_submit_attempts"] == 1
+
+
+def test_correction_audit_detects_original_or_grant_rewrite_even_with_matching_latest_payload(pilot):
+    original, client = pilot
+    rejected_original(original, client)
+    correction = correction_scope(original, client)
+    correction.grant_correction()
+    state = stored(original)
+    state["correction_grant"]["max_additional_attempts"] = 2
+    encoded = canonical_json(state)
+    with sqlite3.connect(original.db) as conn:
+        conn.execute("UPDATE state SET payload=?", (encoded,))
+        conn.execute("UPDATE events SET payload=? WHERE id=?", (encoded, state["sequence"]))
+    with pytest.raises(PilotError, match="binding_or_state_invalid"):
+        correction.status(reconcile=False)
+    assert len(client.post_calls) == 1
+
+
+def test_persisted_request_matches_adapter_wire_normalization_with_trailing_zero_grid(pilot):
+    from atlas.brokers.alpaca_paper import _terms
+    controller, client = pilot
+    client.asset_value["price_increment"] = "0.0100"
+    result = controller.submit_once()
+    intent = result["intent"]
+    terms = _terms(controller.client_id, intent["request"]["qty"], intent["request"]["limit_price"])
+    assert intent["request_canonical_json"] == json.dumps(terms, sort_keys=True, separators=(",", ":"))
+    assert intent["request"]["limit_price"] == "98000"
+
+
+def test_original_acceptance_appearing_after_grant_fails_without_rewriting_proof(pilot):
+    original, client = pilot
+    rejected_original(original, client)
+    correction = correction_scope(original, client)
+    correction.grant_correction()
+    before = stored(original)
+    old = before["intent"]["request"]
+    client.accept(old["client_order_id"], old["qty"], old["limit_price"])
+    with pytest.raises(PilotError, match="original_order_appeared_after_grant"):
+        original.status()
+    assert stored(original) == before
+    with pytest.raises(PilotError):
+        correction.submit_once()
+    assert len(client.post_calls) == 1
