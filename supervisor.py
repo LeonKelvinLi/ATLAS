@@ -1,10 +1,10 @@
-"""Portable supervisor for explicitly selected paper, practice or real operation.
+"""Legacy supervisor for explicitly selected paper or practice operation.
 
 Run with ``--mode paper`` to collect candles and log signals, or explicitly
 select ``--mode practice`` to let the runner place demo-account orders.
-``--mode real`` requires IQ_ALLOW_REAL=1 and an explicit positive --amount
-in account currency. No account or application is started by importing this
-module. Real records are isolated beneath logs/real.
+``--mode real`` is quarantined before configuration or process creation.
+New execution belongs to atlas.service, after broker and strategy validation.
+No account or application is started by importing this module.
 ``--paper`` remains an alias for ``--mode paper``. No mode is selected by
 default. Choosing a mode does not validate model artifacts or authorize a
 second host to use an account already running elsewhere.
@@ -23,7 +23,8 @@ import time
 from datetime import datetime, timezone
 
 from instruments import INSTRUMENTS
-from execution_mode import PendingSubmissionError, REAL_ORDER_BLOCKED_EXIT, resolve_execution
+from execution_mode import (PendingSubmissionError, REAL_ORDER_BLOCKED_EXIT,
+                            reject_legacy_real_mode, resolve_execution)
 from runtime_paths import ENV_FILE, LOGS_DIR, PROJECT_DIR, load_env_file
 
 PYTHON = sys.executable
@@ -234,13 +235,17 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--mode", choices=("paper", "practice", "real"),
-                      help="paper logs signals; practice/real select the order balance")
+                      help="paper logs signals; practice selects the demo balance; real is quarantined")
     mode.add_argument("--paper", dest="mode", action="store_const", const="paper",
                       help="alias for --mode paper")
     ap.add_argument("--collect-min", type=_positive_minutes, default=60)
     ap.add_argument("--amount", type=float,
                     help="stake in account currency; required for real mode")
     args = ap.parse_args(argv)
+    try:
+        reject_legacy_real_mode(args.mode)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     # Validate before acquiring locks, creating logs or launching children.
     # Loading the selected configuration does not connect to the broker.

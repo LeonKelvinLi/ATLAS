@@ -1,7 +1,7 @@
 [project]
 name = "atlas-iqoption"
 version = "0.1.0"
-description = "FX research pipeline with causal features, purged validation, and optional IQ Option demo integration"
+description = "AI-assisted quantitative research with deterministic risk, durable proposals, and broker adapters"
 requires-python = ">=3.12"
 dependencies = [
   "mcp>=1.28,<2",

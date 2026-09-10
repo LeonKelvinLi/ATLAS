@@ -1,7 +1,10 @@
 """IQ Option MCP server.
 
 Wraps the community-maintained (unofficial, reverse-engineered) iqoptionapi
-websocket library and exposes account, market-data and trading tools over MCP.
+websocket library for historical account and market-data inspection. Order
+mutation helpers remain Python-only for regression coverage; they are not
+registered MCP tools. The ATLAS platform MCP interface owns proposals,
+approval, risk checks, durable execution intent, and cancellation.
 
 Safety model:
   - Connects to the PRACTICE balance by default (IQ_DEFAULT_BALANCE).
@@ -301,7 +304,8 @@ def iq_payouts() -> dict:
 @mcp.tool()
 def iq_instruments(instrument_type: str) -> list[dict]:
     """List tradable instruments for margin markets: instrument_type is one of
-    'cfd', 'forex', 'crypto'. Returns instrument ids to use with iq_place_order."""
+    'cfd', 'forex', 'crypto'. This historical MCP interface exposes instrument
+    metadata only; it has no order placement tool."""
     if instrument_type not in ("cfd", "forex", "crypto"):
         raise IQError("instrument_type must be cfd, forex or crypto")
     client = _ensure_connected()
@@ -350,10 +354,11 @@ def iq_positions(instrument_type: str = "cfd") -> list[dict]:
     return trimmed
 
 
-@mcp.tool()
 @_account_operation
 def iq_place_binary(asset: str, direction: str, amount: float, duration_minutes: int = 1) -> dict:
-    """Place a binary option trade. direction is 'call' (price up) or 'put'
+    """Legacy Python-only helper, deliberately unavailable through MCP.
+
+    Place a binary option trade. direction is 'call' (price up) or 'put'
     (price down); amount is the stake in account currency; duration_minutes is
     the expiry (1, 5, 15...). Blocked on the REAL balance unless IQ_ALLOW_REAL=1.
     Returns the order id - pass it to iq_binary_result to learn the outcome."""
@@ -383,7 +388,6 @@ def iq_binary_result(order_id: int, wait_seconds: int = 75) -> dict:
     return {"order_id": order_id, "result": result, "profit": profit}
 
 
-@mcp.tool()
 @_account_operation
 def iq_place_order(
     instrument_type: str,
@@ -399,7 +403,9 @@ def iq_place_order(
     take_profit_kind: str | None = None,
     take_profit_value: float | None = None,
 ) -> dict:
-    """Place a margin order (CFD / forex / crypto). side is 'buy' or 'sell';
+    """Legacy Python-only helper, deliberately unavailable through MCP.
+
+    Place a margin order (CFD / forex / crypto). side is 'buy' or 'sell';
     order_type is 'market', 'limit' (needs limit_price) or 'stop' (needs
     stop_price). stop_loss/take_profit kinds are 'percent', 'diff' or 'price'.
     Use iq_instruments to find instrument_id values. Blocked on the REAL
@@ -436,10 +442,11 @@ def iq_place_order(
             "balance_mode": _call(client.get_balance_mode)}
 
 
-@mcp.tool()
 @_account_operation
 def iq_close_position(order_id: int) -> dict:
-    """Close an open margin position by the order id returned from
+    """Legacy Python-only helper, deliberately unavailable through MCP.
+
+    Close an open margin position by the order id returned from
     iq_place_order (for positions listed by iq_positions, use their 'id').
     Blocked on the REAL balance unless IQ_ALLOW_REAL=1."""
     client = _ensure_connected()
@@ -450,14 +457,16 @@ def iq_close_position(order_id: int) -> dict:
     return {"closed": True, "order_id": order_id, "balance": _call(client.get_balance)}
 
 
-@mcp.tool()
 @_account_operation
 def iq_cancel_order(order_id: int) -> dict:
-    """Cancel a pending (not yet filled) margin order."""
+    """Legacy Python-only cancellation request; never claims verified closure."""
     client = _ensure_connected()
     _require_trading_allowed(client)
-    _call(client.cancel_order, order_id, timeout=60)
-    return {"cancelled": True, "order_id": order_id}
+    acknowledgement = _call(client.cancel_order, order_id, timeout=60)
+    return {"order_id": order_id,
+            "request_acknowledged": acknowledgement if isinstance(acknowledgement, bool) else None,
+            "cancellation_status": "unknown",
+            "note": "A request acknowledgement does not prove cancellation; verify broker order history."}
 
 
 if __name__ == "__main__":

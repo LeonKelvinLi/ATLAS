@@ -1,0 +1,18 @@
+{
+  "mode": "research",
+  "broker": "unavailable",
+  "state_dir": "/var/lib/atlas",
+  "risk": {
+    "allowed_symbols": [],
+    "max_order_notional": "100",
+    "max_position_notional": "500",
+    "max_concentration": "0.10",
+    "max_daily_loss": "100",
+    "max_daily_trades": 10
+  },
+  "http": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "execution_tools": false
+  }
+}

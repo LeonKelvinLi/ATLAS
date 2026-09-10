@@ -23,3 +23,5 @@ jobs:
         run: uv run --locked python -m pytest -q -ra
       - name: Run public demo
         run: uv run --locked python demo.py
+      - name: Run in-memory platform demo
+        run: uv run --locked python -m atlas demo

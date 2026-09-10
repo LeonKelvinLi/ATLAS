@@ -55,7 +55,8 @@ OPERATIONAL_MODULES = [
     "settle_missing.py", "probe_execution.py", "probe_order_record.py",
     "selfcheck.py", "watchdog.py", "catchup_gaps.py", "extra_collect.py",
     "backup_state.py", "status.py", "dashboard.py",
-    "supervisor.py", "runtime_paths.py",
+    "supervisor.py", "runtime_paths.py", "execution_mode.py", "execution_guard.py", "server.py",
+    *[str(path.relative_to(PROJECT_DIR)) for path in sorted((PROJECT_DIR / "atlas").rglob("*.py"))],
 ]
 
 

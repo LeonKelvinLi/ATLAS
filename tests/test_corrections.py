@@ -161,7 +161,7 @@ def test_noise_brier_never_beats_prior_baseline_materially():
         frame.insert(0, "from_ts", 1_000_000 + np.arange(n) * 60)
         frame.insert(1, "to_ts", frame["from_ts"] + 60)
         frame["label_up"] = (rng.random(n) < 0.5).astype(float)
-        frame["feature_version"] = "test"
+        frame["feature_version"] = "1.3.0"
         result = walk_forward(frame, payout=0.85, n_splits=3)
         for fold in result["folds"]:
             prior_brier = fold["base_rate_up"] * (1 - fold["base_rate_up"])

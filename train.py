@@ -31,7 +31,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from features import FEATURE_COLUMNS, FEATURE_VERSION, build_features
+from features import CAUSAL_FEATURE_VERSION, FEATURE_COLUMNS, FEATURE_VERSION, build_features
 
 MODEL_VERSIONS = {
     "logreg": "logreg-1.1.0",  # 1.1.0: chronological purged calibration
@@ -124,6 +124,10 @@ def chrono_calibration_splits(
     sequential blocks; fold k trains on every row strictly before block k+1
     minus a `gap` purge (overlapping-label protection) and validates on block
     k+1. Every training index therefore precedes every validation index."""
+    for name, value, minimum in (("n_rows", n_rows, 0), ("n_folds", n_folds, 1),
+                                 ("gap", gap, 0), ("min_train", min_train, 1)):
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < minimum:
+            raise ValueError(f"{name} must be an integer >= {minimum}")
     boundaries = np.linspace(0, n_rows, n_folds + 2, dtype=int)
     splits = []
     for k in range(1, n_folds + 1):
@@ -239,8 +243,8 @@ def tune_lgbm(X: pd.DataFrame, y: pd.Series, gap: int, n_trials: int) -> dict:
     return dict(study.best_params)
 
 
-def feature_hash() -> str:
-    payload = FEATURE_VERSION + "|" + ",".join(FEATURE_COLUMNS)
+def feature_hash(feature_version: str = FEATURE_VERSION) -> str:
+    payload = feature_version + "|" + ",".join(FEATURE_COLUMNS)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -272,6 +276,7 @@ def make_signal(
     expiry_seconds: int,
     fold: int,
     model_version: str = MODEL_VERSION,
+    feature_version: str = FEATURE_VERSION,
 ) -> dict:
     """One MIDAS-compatible BinarySignal JSON object (serde field names).
 
@@ -290,7 +295,7 @@ def make_signal(
         "payout": out_payout,
         "predicted_prob_up": round(float(p_up), 6),
         "model_version": model_version,
-        "feature_hash": feature_hash(),
+        "feature_hash": feature_hash(feature_version),
         "note": f"fold={fold}{tag}",
     }
 
@@ -306,6 +311,7 @@ def walk_forward(
     horizon: int = 5,
     model_kind: str = "logreg",
     tune_trials: int = 0,
+    feature_version: str = FEATURE_VERSION,
 ) -> dict:
     """Run the train-freeze-predict loop. Returns signals + fold metrics.
 
@@ -313,10 +319,20 @@ def walk_forward(
     (to_ts) -> float | None that returns the latest prospective payout
     snapshot at or before the signal timestamp (None = unavailable ->
     forced no_trade)."""
+    # Public research callers cannot bypass the horizon purge or supply a
+    # shuffled/pooled frame to this single-series row-based splitter.
+    from atlas.validation import validate_chronology, validate_gap
+    if feature_version not in {FEATURE_VERSION, CAUSAL_FEATURE_VERSION}:
+        raise ValueError("unsupported research feature contract")
+    if not feature_frame["feature_version"].eq(feature_version).all():
+        raise ValueError("feature frame version must match the explicit research contract")
+    gap = validate_gap(horizon, gap)
+    validate_chronology(feature_frame["to_ts"].tolist())
     labeled = feature_frame.dropna(subset=["label_up"]).reset_index(drop=True)
     X = labeled[FEATURE_COLUMNS]
     y = labeled["label_up"]
-    gap = horizon if gap is None else gap
+    if not np.isfinite(X.to_numpy(dtype=float)).all() or not y.isin([0.0, 1.0]).all():
+        raise ValueError("features must be finite and labels binary")
     model_version = MODEL_VERSIONS[model_kind]
     prospective = callable(payout)
     payout_at = payout if prospective else (lambda ts: payout)
@@ -343,6 +359,7 @@ def walk_forward(
             make_signal(
                 ts, p, payout_at(int(ts)), ev_margin, stake, expiry_seconds, fold,
                 model_version=model_version,
+                feature_version=feature_version,
             )
             for ts, p in zip(labeled["to_ts"].iloc[test_idx], p_up)
         ]
@@ -374,8 +391,8 @@ def walk_forward(
         "folds": folds,
         "manifest": {
             "model_version": model_version,
-            "feature_version": FEATURE_VERSION,
-            "feature_hash": feature_hash(),
+            "feature_version": feature_version,
+            "feature_hash": feature_hash(feature_version),
             "feature_columns": FEATURE_COLUMNS,
             "payout_source": "prospective" if prospective else "assumed",
             "assumed_payout": None if prospective else payout,
@@ -457,6 +474,8 @@ def main() -> None:
     parser.add_argument("--asset", default="EURUSD")
     parser.add_argument("--interval", type=int, default=60)
     parser.add_argument("--horizon", type=int, default=5, help="label horizon in bars")
+    parser.add_argument("--feature-version", choices=(FEATURE_VERSION, CAUSAL_FEATURE_VERSION),
+                        default=FEATURE_VERSION, help="v2 is opt-in new research; never relabel frozen bundles")
     parser.add_argument(
         "--payout-mode",
         choices=("assumed", "prospective"),
@@ -495,7 +514,8 @@ def main() -> None:
             f"conflicts - resolve before training: {history_report['conflicts'][:3]}"
         )
 
-    feature_frame = build_features(candles, interval=args.interval, horizon=args.horizon)
+    feature_frame = build_features(candles, interval=args.interval, horizon=args.horizon,
+                                   feature_version=args.feature_version)
 
     if args.payout_mode == "prospective":
         from instruments import get_instrument
@@ -517,6 +537,7 @@ def main() -> None:
         horizon=args.horizon,
         model_kind=args.model,
         tune_trials=args.tune_trials,
+        feature_version=args.feature_version,
     )
     campaign = args.campaign or f"{args.asset.lower()}-{args.model}"
     result["manifest"]["asset"] = args.asset

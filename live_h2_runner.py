@@ -7,10 +7,10 @@ value against the LIVE binary payout, and append one JSON line per signal
 to logs/live_h2.jsonl.
 
 --mode practice (legacy --trade) places 15-minute practice binaries.
---mode real requires IQ_ALLOW_REAL=1 and an explicit --amount in account
-currency. The selected balance is checked at startup and before every buy.
-Default is paper. REAL records go to logs/real, outside frozen research
-evidence. Run bounded with --minutes; schedule externally on the server.
+--mode real is quarantined before configuration or model loading. New live
+execution requires the platform proposal/risk path and validated providers.
+The selected practice balance is checked at startup and before every buy.
+Default is paper. Retained REAL internals are covered only by fake tests.
 """
 
 import argparse
@@ -29,7 +29,7 @@ import pandas as pd
 
 from features import build_features
 from execution_mode import (PENDING_ORDER_FILE, REAL_ORDER_BLOCKED_EXIT,
-                            PendingSubmissionError, resolve_execution)
+                            PendingSubmissionError, reject_legacy_real_mode, resolve_execution)
 from instruments import INSTRUMENTS
 from research_pooled import currencies
 from runtime_paths import ENV_FILE, LOGS_DIR, MODELS_DIR, load_env_file
@@ -723,6 +723,10 @@ def main() -> int:
     parser.add_argument("--amount", type=float,
                         help="stake in account currency; required explicitly for real mode")
     args = parser.parse_args()
+    try:
+        reject_legacy_real_mode(args.mode)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.minutes <= 0:
         parser.error("--minutes must be positive")
     _load_env()

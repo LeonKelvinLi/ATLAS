@@ -1,12 +1,11 @@
-"""Sole gateway for any future model-driven order.
+"""Legacy binary-contract check, retained for offline compatibility tests.
 
-NOTHING in this repository calls guarded_buy from a live path today -
-model-driven practice execution is forbidden until the promotion gates pass
-prospectively (reviewer directive 2026-07-21). When an executor is
-eventually approved, it MUST place orders exclusively through guarded_buy:
-the run-bundle contract is re-verified immediately before the broker call,
-so a mismatched expiry, active, or option kind can never reach client.buy.
+This helper is not the platform execution gateway and must not be exposed
+through MCP. New execution uses atlas.service.AtlasService and its durable
+proposal, risk, approval and reconciliation path. Legacy REAL CLIs refuse.
 """
+
+import math
 
 from instruments import InstrumentSpec, verify_contract
 
@@ -32,8 +31,8 @@ def guarded_buy(
     )
     if direction not in ("call", "put"):
         raise ValueError(f"direction must be 'call' or 'put', got {direction!r}")
-    if amount <= 0:
-        raise ValueError(f"amount must be positive, got {amount}")
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount) or amount <= 0:
+        raise ValueError("amount must be finite and positive")
     return call(
         client.buy, amount, spec.order_active, direction, spec.expiry_minutes, timeout=timeout
     )

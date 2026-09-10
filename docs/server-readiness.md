@@ -1,213 +1,83 @@
 # Server readiness
 
-ATLAS will run on a server. The Desktop checkout is for development and
-offline verification. No application service, startup job, broker session,
-or host migration has been configured by this change.
+ATLAS is prepared for further Linux integration work. **No service, broker session, listener, scheduled job or server deployment was started during this development pass.** The Mac checkout remains for development and offline verification.
 
-## Current implementation
+## Current platform boundary
 
-The repository includes a Python supervisor, collector, live runner,
-reconciliation tools, DuckDB candle storage, SQLite journal, JSONL logs,
-and desktop-oriented health and backup scripts. Three historical model
-pickles and a small legacy journal are tracked, even though `.gitignore`
-matches them. The full market database, live execution logs, broker
-dependency, and credentials are absent. The included snapshots still need
-provenance and compatibility checks before resuming a research run.
-Historical notes do not establish whether another host is currently running.
+`atlas/` owns the new research/MCP/proposal/risk/execution architecture. The CLI factory supports an unconfigured research broker and an explicitly funded **synthetic** paper simulator. Both real broker selections refuse before creating state. The live-assisted and live-auto service paths are tested with fake adapters; that is not production readiness.
 
-The new `uv.lock` and offline checks provide a reproducible development
-baseline. They are not certification of a production host or compatibility
-with an old serialized model.
+Research defaults to unavailable account data, not a generated portfolio. The default CLI prints help. The offline `python -m atlas demo` uses in-memory synthetic data. `config-check` validates an explicit external configuration without creating state or contacting a broker. Actual MCP startup is a separate intentional command and was not run here.
 
-## Runtime paths
+The complete inert examples and configuration contract are in [`deploy/README.md`](../deploy/README.md), [`research-config.example.json`](../deploy/research-config.example.json), and [`atlas.service.example`](../deploy/atlas.service.example). These are source files, not installed host configuration.
 
-[`runtime_paths.py`](../runtime_paths.py) separates code from operational
-state. Set these variables in the process environment **before starting
-Python**. Path selectors inside `.env` are ignored so children cannot inherit
-different paths from their parent. Inspect the resolved values with
-`uv run --locked python runtime_paths.py`; this only prints paths and
-creates nothing.
+## Configuration, state and secrets
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `ATLAS_STATE_DIR` | Code checkout | Market database, journal, runtime logs, and feature cache |
-| `ATLAS_MODEL_DIR` | State directory / `models` | Model bundles read by the runner, monitoring, and evaluator |
-| `ATLAS_ENV_FILE` | State directory / `.env` | Optional credential/configuration file; process values take precedence |
-| `ATLAS_BACKUP_DIR` | Unconfigured | Explicit backup destination; the backup CLI also accepts `--destination` |
+The new platform uses an explicit external JSON configuration; it does not autoload `.env`. Configuration includes mode, broker selection, persistent state directory, dataset/quote fixture paths, deterministic risk settings and optional HTTP settings. Secret inputs are external owner-only files selected by environment variable; no account number or key is included in examples.
 
-Overrides must be absolute paths. Selecting an external state directory does
-not move existing files or copy the repository's journal/models. Restore
-approved state deliberately. Python operational tools use these paths;
-historical shell wrappers and research ledgers/output conventions have not
-been converted into a server deployment system.
+| Selection | Purpose |
+|---|---|
+| `state_dir/research/execution.db` | Research scope |
+| `state_dir/paper/execution.db` | Paper proposals, attempts and audit events |
+| `state_dir/paper/simulator.db` | Persistent synthetic cash, positions and broker orders |
+| `state_dir/live/execution.db` | Shared live-assisted/live-auto scope, preventing mode changes from escaping unknown orders |
+| `state_dir/KILL_SWITCH` | Presence blocks new orders; an unreadable path also blocks |
+| `ATLAS_HTTP_BEARER_FILE` | Owner-only HTTP bearer secret, at least 32 bytes |
+| `ATLAS_EXPECTED_ACCOUNT_FILE` | Expected account identity for future live assembly |
+| `ATLAS_APPROVAL_KEY_FILE` | Reserved verifier-key path for future live assembly |
+| `ATLAS_LIVE_TRADING_ENABLED=true` | Independent future live opt-in |
+| `ATLAS_LIVE_AUTO_ENABLED=true` | Additional automatic-mode opt-in |
 
-## Start and stop behavior
+Paths must be absolute and outside the checkout. Research and paper cannot open a live-scoped journal. Existing empty, malformed or inconsistent journals/simulator databases refuse rather than recreate money or discard pending orders. SQLite WAL/FULL synchronization and directory fsync are part of the submission boundary; unsupported or failing durable storage must block operations.
 
-- The supervisor requires `--mode paper`, `--mode practice`, or `--mode real`;
-  the explicit `--paper` alias still works. Missing or conflicting mode
-  arguments fail before the lock, logs, or child processes are created.
-- Real mode requires `IQ_ALLOW_REAL=1` and an explicit finite positive
-  `--amount` in the account's currency. Practice defaults to one
-  account-currency unit; paper rejects an amount. The selected environment
-  file is read before configuration validation, with process values taking
-  precedence. The supervisor forwards the exact mode and stake to its child.
-- SIGTERM/SIGINT stop new supervisor work and request termination of tracked
-  runner and collector children. Cleanup has shared wait/kill deadlines.
-  Collector processes that survive cleanup must not overlap a later cycle.
-- The runner stops new decisions and orders when shutdown is requested.
-  An already-started broker call cannot be cancelled by cancelling its
-  Python wait. It allows a short acknowledgement grace, records an unknown
-  submission when acknowledgement is unavailable, and preserves known
-  unresolved IDs for later reconciliation.
-- Ordinary completion retains the existing settlement wait, which can
-  outlast `--minutes`. A shutdown request interrupts that wait and gives
-  reconciliation a shared eight-second budget, followed by bounded
-  disconnect. The watchdog stops before reconciliation. These are code
-  deadlines; host scheduling and real broker behavior still need testing.
-- Watchdog recovery and dashboard startup require separate `--recover` and
-  `--ensure-dashboard` flags. Default checks log health without starting
-  ATLAS applications. Task restart support remains Windows-specific and
-  reports unavailable elsewhere.
-  `--recover` invokes historical task definitions whose execution mode is
-  not established by this change; it is not a REAL-mode launch interface.
+## Startup, shutdown and observability
 
-## Real execution and recovery
+The HTTP wrapper requires a bearer credential on every route, binds only loopback, rejects non-loopback peers, bounds bodies and disables access logs. The example systemd unit uses a dedicated user, restricted writes and networking, restrictive umask and bounded shutdown. A remote authenticated gateway, TLS, operator identity, resource limits and host enforcement remain separate work.
 
-Real execution is implemented as an explicit future server option. This
-development pass keeps all applications and account sessions stopped: it
-does not activate funded use, change credentials, connect to the broker,
-or submit orders. The default example configuration remains PRACTICE with
-real execution disabled. The unofficial
-[`iqoptionapi`](https://github.com/iqoptionapi/iqoptionapi) maintainers caution
-against real-account use; local fake-client checks cannot establish broker
-reliability or a profitable strategy.
+`/healthz` checks journal integrity. `/readyz` reports mode, kill/pending state and known blockers without probing a broker or loading model pickles. Research can be healthy while not execution-ready. Readiness never certifies live connectivity; live preparation remains blocked. Operational health and broker readiness are separate evidence.
 
-The runner selects the requested balance at startup and verifies it again
-immediately before every order. Unknown or unexpected balance state prevents
-submission. Amounts are in the account's currency, not a hardcoded US-dollar
-denomination. Mode checks cannot coordinate multiple hosts or guarantee that
-an account is not controlled elsewhere.
+SIGINT/SIGTERM set the service stop event before server cleanup. A broker call already started in a thread cannot be cancelled by stopping the waiting code. Timeout/shutdown leaves the intent unknown until exact broker history is reconciled. Tests use fake clients and captured signal handlers; real Linux signal/process/storage behavior remains untested.
 
-Real records are isolated beneath the selected state's `logs/real/`
-directory, including `live_h2.jsonl`, `live_h2_heartbeat.jsonl`,
-`cross_section.jsonl`, and `supervisor.log`. Historical paper/practice logs,
-frozen model artifacts, and the registered evaluation paths remain separate.
-Monitoring selects these records with `ATLAS_MONITOR_MODE=real` in the
-process environment or `--mode real` on `status.py`/`dashboard.py`. Selecting
-records for observation does not enable orders and needs no stake or opt-in.
+SQLite audit events retain proposal IDs, timestamps, caller labels, immutable strategy/evidence/risk, client UUIDs and observed outcomes. The eventual host should monitor unknown/pending duration, rejected attempts, storage failure, readiness changes and feed freshness. Those alerts are not installed. Journald rotation/retention must be configured on the selected host; no local rotation job was created.
 
-Before submitting a real order, the runner persists
-`logs/real/order_submission_pending.json`. If an acknowledgement is unknown
-or the process crashes during submission, that marker remains. A runner
-blocked by unresolved submission exits with status 3; the supervisor stops
-instead of relaunching it. It also checks the marker after any other runner
-exit and before each launch, so a hard kill cannot bypass this boundary.
-This durability boundary requires a filesystem that supports opening and
-syncing directories as well as files. Failed directory synchronization
-blocks submission or preserves the pending marker; it is never silently
-bypassed. Verify support on the selected server OS and storage before use.
+## Recovery and backups
 
-Reconciliation is a manual operator task: locate the exact submission in
-broker history, preserve its order ID and verified outcome (or establish
-that it was never accepted), and reconcile the operational record before
-clearing a remaining marker. An absent acknowledgement does not establish
-that the order was cancelled. Never delete the marker merely to make a
-restart succeed. Known unresolved order IDs still require outcome recovery;
-the marker specifically tracks a submission whose acceptance was not
-durably established.
+Submission sequence: verify proposal and approval, commit intent/client UUID, refresh account/quote/risk and approval, submit once, validate correlation/fills, commit observed result. Repeated requests return the existing intent. Unknown acceptance blocks the account. A missing history result is insufficient evidence to clear it. Known accepted and partial orders also remain pending until terminal reconciliation.
 
-`settle_missing.py --mode real` selects real records for broker-history
-reconciliation and requires `IQ_ALLOW_REAL=1`; it requires no stake and never
-places an order. Its `--dry-run` option inspects local records, but keeps the
-same explicit real opt-in requirement. A pending marker is reported as an
-unresolved condition and is never automatically cleared by this tool.
+Cancellation uses a separate proposal/approval and durable child intent. An accepted cancellation request is not proof of cancellation. Fills can arrive while cancellation is pending. Target and child completion update atomically; cumulative acknowledged fills must not decrease, including across concurrent reconcilers.
 
-`selfcheck.py` accepts `--mode` (paper by default) and `--amount` to inspect
-the intended configuration without activating it. Real checks require the
-opt-in, explicit stake, absence of a pending submission marker, and the
-real signal log in the selected backup. Its existing broader audit also
-checks host services, data, model provenance, and git state. A configuration
-check passing does not establish current broker balance or account identity.
+`Ledger.backup()` uses SQLite's online backup API to an explicit external destination and checks the copy; it never falls back to copying damaged bytes. Paper simulator cash/order state needs a consistent SQLite snapshot too. Cross-database backup coordination, encryption, offsite retention, model/data provenance and a restore drill remain host work. No backup schedule was configured.
 
-## Backups
+A ledger restored to a time before a broker submission can no longer establish uniqueness by itself. Before any resumed broker write, reconcile the restored state with authoritative broker history and establish one active host/account writer. Do not delete unknown intents or seed a fresh database to make startup succeed.
 
-Backups require an explicit absolute destination and read from the selected
-state directory. `.env` is excluded; credential storage/recovery must be
-configured separately. SQLite journals use the backup API, including paths
-with URI punctuation, so committed WAL data is retained. The historical
-plain-copy fallback for non-readable/non-SQLite journal files remains.
+## Legacy compatibility and quarantine
 
-This script copies the listed operational logs and SQLite journal. It does
-not snapshot `market.duckdb` or archive model bundles; the host backup plan
-must cover those separately. Broker retention is limited, so do not assume
-the full accumulated market history can be downloaded again.
+The historical FX-binary collectors, journals and evaluation rules remain in the root modules. Legacy `supervisor.py --mode real` and `live_h2_runner.py --mode real` now refuse before reading configuration, loading models or creating processes. `IQ_ALLOW_REAL=1` does not bypass that quarantine. Legacy order-placement/cancellation Python helpers are retained for compatibility tests but are not advertised or callable through the old `server.py` MCP registry. Legacy paper/practice operations still require a separately authorized broker session; none ran here.
 
-Real logs and order-reconciliation records preserve their `logs/real/` tree
-inside the backup destination, including a pending submission marker when
-present. Historical paper/practice backup files retain their flattened
-names, such as `logs_live_h2.jsonl`. Real self-checks inspect
-`logs/real/live_h2.jsonl` in the backup, keeping those evidence streams
-distinct during backup and restore as well.
+Root operational tools retain their existing external selectors:
 
-A copied local directory is not proof of offsite replication. Scheduling,
-retention, encryption/access permissions, and a restore drill belong to the
-eventual host configuration.
+| Variable | Legacy role |
+|---|---|
+| `ATLAS_STATE_DIR` | Market database, journal, logs and cache |
+| `ATLAS_MODEL_DIR` | Historical model directory |
+| `ATLAS_ENV_FILE` | Selected optional environment file |
+| `ATLAS_BACKUP_DIR` | Explicit backup destination |
 
-## Remaining before deployment
+`python runtime_paths.py` only reports paths. These selectors are distinct from the new platform JSON configuration. Monitoring/reconciliation can still select historical `logs/real/`; observation does not enable trading. The old backup utility has different coverage and legacy fallbacks; do not use it as proof of new-platform recovery. Old `selfcheck.py` inspects host/data/model state and is not the new lightweight health endpoint. Historical Windows wrappers and `CLAUDE.md` describe earlier hosts, not present deployment instructions.
 
-1. Select the server OS and provider, then implement and test its service
-   manager, health integration, persistent volumes, and backup destination.
-   No such services or startup jobs are configured by this change.
-2. Pin and verify exact model hashes, cutoff/provenance, feature contracts,
-   and dependency compatibility in a startup preflight. Model selection
-   still uses newest matching filenames, and missing H3/H4 bundles remain
-   optional. Restore approved artifacts; do not retrain frozen hypotheses
-   to replace missing files.
-3. Confirm a single active host for the account before migration. Local
-   socket locks cannot coordinate two servers. Reconcile unresolved or
-   unknown broker submissions during handover; tests cannot establish that
-   an in-flight order was cancelled.
-4. Verify the actual host with restored state, restart/shutdown tests,
-   PRACTICE-account connectivity, and backup recovery before considering
-   funded activation. The local synthetic checks establish code behavior,
-   not hosted operation or the suitability of the unofficial adapter for
-   funded use.
+## Before a research/paper server deployment
 
-## Work completed in this development pass
+1. Select Linux host/storage and a dedicated user; review the service unit and install locked dependencies there.
+2. Provide explicit external configuration, synthetic or verified dataset provenance, paper assumptions and owner-only authentication secrets.
+3. Configure private client access, monitoring, retention and consistent encrypted backup/restore.
+4. Test real OS termination, disk-full behavior, persistence/restart and authentication on that host, with paper/fake execution only.
 
-- Added a generated-data demo with storage round-trip and chronological-purge
-  checks; it neither starts workers nor accesses research datasets.
-- Added a portable dependency lock and a GitHub Actions workflow for offline
-  tests. The workflow has not been run on GitHub as part of this local change.
-- Fixed calibration on a training fold containing one class.
-- Rejected overlapping candles and invalid bar spacing before feature use.
-- Made private-data smoke tests opt-in and read-only, isolated supervisor
-  lock tests, and made failed lint-tool execution fail the tests.
-- Rewrote the README to distinguish historical research reports from
-  independently reproducible evidence and current operational status.
-- Added explicit supervisor modes, graceful process cleanup, external
-  runtime paths, selected backup destinations, and opt-in watchdog actions.
-- Added fake-client/process lifecycle tests and external-state integration
-  tests, including SQLite WAL restoration and environment precedence.
+## Additional blockers before funded trading
 
-Latest local verification on September 9, 2026:
+1. Owner-controlled official broker consent and authenticated schema review; verify the exact account and supported product.
+2. Implement the actual narrowly mapped network transport and complete account/market provider. Crypto REST currently lacks required verified cash/equity/daily P&L/liquidity/session inputs; Agentic schemas are not yet mapped.
+3. Bind a validated signal provider to approved artifact hashes, feature version, asset/target/horizon, as-of data and calibration evidence. The supplied baseline registry cannot self-promote to live.
+4. Produce sufficient fresh, cost-aware, independent evidence against simple baselines. The current model does not have that evidence.
+5. Replace or harden the shared-key approval trust arrangement for production, validate broker idempotency/history semantics, and establish a single account writer with reconciliation and rollback drills.
+6. Have the owner approve the concrete account, limits, funding, host and activation after those requirements are met.
 
-- `uv sync --locked --group dev` succeeded.
-- `uv run --locked python -m pytest -q -ra`: **484 passed, 2 skipped**.
-  The skips require the optional broker library and an explicitly selected
-  dataset. Lifecycle tests use fake clients/processes and captured handlers.
-- Final targeted execution, shutdown/durability, REAL records, MCP balance,
-  and self-check regression run: **118 passed**. This also covers refinements
-  made while the full suite was running; counts overlap and are not additive.
-- `uv run --locked python demo.py`: **five integrity checks passed** on
-  2,400 generated candles.
-- Static undefined-name checks and `git diff --check` passed. Tracked model
-  bundles, the legacy journal, and frozen research records are unchanged.
-
-Actual OS signal delivery, broker behavior, server operation, and the GitHub
-Actions run remain unverified.
-
-The frozen protocol and research records remain the reference for any
-future evaluation: [`FORWARD_TEST.md`](../FORWARD_TEST.md),
-[`FINDINGS.md`](../FINDINGS.md), and
-[`RESEARCH_QUEUE.md`](../RESEARCH_QUEUE.md).
+See [`platform-report.md`](platform-report.md) for exact local test results and the final implementation inventory. Local tests do not establish server operation, broker connectivity, investment profitability or a GitHub Actions run.

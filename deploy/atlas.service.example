@@ -1,0 +1,41 @@
+# Inert example. Do not install or start on the development Mac.
+[Unit]
+Description=ATLAS research MCP interface
+After=network.target
+ConditionPathExists=/etc/atlas/config.json
+ConditionPathExists=/etc/atlas/http-bearer
+
+[Service]
+Type=simple
+User=atlas
+Group=atlas
+WorkingDirectory=/opt/atlas
+Environment=PYTHONUNBUFFERED=1
+Environment=ATLAS_HTTP_BEARER_FILE=/etc/atlas/http-bearer
+ExecStart=/opt/atlas/.venv/bin/python -m atlas mcp --config /etc/atlas/config.json --transport http
+StateDirectory=atlas
+RuntimeDirectory=atlas
+UMask=0077
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+ReadWritePaths=/var/lib/atlas
+IPAddressDeny=any
+IPAddressAllow=localhost
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

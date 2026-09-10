@@ -63,7 +63,7 @@ def synthetic_features(n: int = 900, seed: int = 5) -> pd.DataFrame:
     frame.insert(1, "to_ts", frame["from_ts"] + 60)
     prob = 1 / (1 + np.exp(-2.5 * frame["rsi"]))
     frame["label_up"] = (rng.random(n) < prob).astype(float)
-    frame["feature_version"] = "test"
+    frame["feature_version"] = "1.3.0"
     return frame
 
 def test_prospective_mode_forces_no_trade_when_payout_missing():
@@ -232,7 +232,8 @@ def test_guarded_buy_blocks_every_mismatch_before_broker_call():
         assert broker.calls == [], f"broker was reached despite mismatch: {manifest}"
 
 
-def test_guarded_buy_validates_direction_and_amount_after_contract():
+@pytest.mark.parametrize("amount", [0.0, -1, True, float("nan"), float("inf"), "1", None])
+def test_guarded_buy_validates_direction_and_amount_after_contract(amount):
     from execution_guard import guarded_buy
     from instruments import get_instrument
 
@@ -245,7 +246,7 @@ def test_guarded_buy_validates_direction_and_amount_after_contract():
     with pytest.raises(ValueError, match="direction"):
         guarded_buy(broker, _direct_call, matching, spec, 1.0, "sideways")
     with pytest.raises(ValueError, match="amount"):
-        guarded_buy(broker, _direct_call, matching, spec, 0.0, "call")
+        guarded_buy(broker, _direct_call, matching, spec, amount, "call")
     assert broker.calls == []
 
 

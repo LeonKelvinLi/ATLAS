@@ -13,6 +13,8 @@ import supervisor
 
 @pytest.fixture(autouse=True)
 def isolated_configuration(monkeypatch, tmp_path):
+    # These fake-process tests cover retained internals behind the CLI quarantine.
+    monkeypatch.setattr(supervisor, "reject_legacy_real_mode", lambda _mode: None)
     monkeypatch.setattr(supervisor, "load_env_file", lambda _path: None)
     monkeypatch.setattr(supervisor, "LOGS_DIR", tmp_path / "logs")
     monkeypatch.setattr(supervisor, "LOG", tmp_path / "logs")

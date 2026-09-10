@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from features import FEATURE_COLUMNS  # noqa: E402
+from features import FEATURE_COLUMNS, FEATURE_VERSION  # noqa: E402
 from train import (  # noqa: E402
     ChronoCalibratedModel,
     decide_action,
@@ -31,7 +31,7 @@ def synthetic_features(n: int = 1200, predictive: bool = True, seed: int = 7) ->
         frame["label_up"] = (rng.random(n) < prob).astype(float)
     else:
         frame["label_up"] = (rng.random(n) < 0.5).astype(float)
-    frame["feature_version"] = "test"
+    frame["feature_version"] = FEATURE_VERSION
     return frame
 
 

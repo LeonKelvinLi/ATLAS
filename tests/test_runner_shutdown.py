@@ -168,6 +168,9 @@ class LoopEvent:
 
 @pytest.fixture
 def session(monkeypatch, tmp_path):
+    # Exercise retained legacy recovery internals with fake clients only.
+    # The public REAL CLI refusal is tested separately in test_legacy_quarantine.
+    monkeypatch.setattr(r, "reject_legacy_real_mode", lambda _mode: None)
     handlers = {signal.SIGINT: signal.SIG_DFL, signal.SIGTERM: signal.SIG_DFL}
     initial_handlers = dict(handlers)
     event = LoopEvent()

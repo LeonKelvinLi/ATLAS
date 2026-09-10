@@ -18,6 +18,7 @@ from ta.trend import ADXIndicator, EMAIndicator, MACD
 from ta.volatility import AverageTrueRange, BollingerBands
 
 FEATURE_VERSION = "1.3.0"  # 1.3.0: + adx, bb_pctb, macd_hist_atr, ret_60
+CAUSAL_FEATURE_VERSION = "2.0.0"  # opt-in research; frozen models retain 1.3.0
 
 EMA_FAST = 8
 EMA_SLOW = 21
@@ -267,6 +268,7 @@ def build_features(
     extra_har: bool = False,
     extra_mtf: bool = False,
     extra_dow: bool = False,
+    feature_version: str = FEATURE_VERSION,
 ) -> pd.DataFrame:
     """Compute the curated feature set plus the forward label, gap-aware.
 
@@ -279,11 +281,13 @@ def build_features(
     Output columns: from_ts, to_ts, every FEATURE_COLUMNS entry, label_up
     (1.0 price rose over `horizon` bars, 0.0 fell, NaN tie/end-of-data), and
     feature_version. Warmup rows with undefined features are dropped."""
+    if feature_version not in {FEATURE_VERSION, CAUSAL_FEATURE_VERSION}:
+        raise ValueError("unsupported feature version")
     segments = split_contiguous(df, interval)
     parts = [
         _build_features_segment(
             segment, interval, horizon, entry_next_open, extra_vol, extra_har,
-            extra_mtf, extra_dow,
+            extra_mtf, extra_dow, feature_version,
         )
         for segment in segments
     ]
@@ -313,6 +317,7 @@ def _build_features_segment(
     extra_har: bool = False,
     extra_mtf: bool = False,
     extra_dow: bool = False,
+    feature_version: str = FEATURE_VERSION,
 ) -> pd.DataFrame:
     # Segments shorter than indicator warmup can't yield any feature row and
     # crash ta's ATR/ADX outright (ADX needs ~2x its window); they
@@ -354,7 +359,14 @@ def _build_features_segment(
     # vol_rel would NaN out the whole segment, so fall back to a neutral 1.0.
     # A zero rolling mean on an otherwise real volume feed is also mapped to
     # NaN (dropped) rather than division-by-zero inf.
-    if df["volume"].gt(0).any():
+    if feature_version == CAUSAL_FEATURE_VERSION:
+        # A future nonzero-volume bar must never change earlier feature rows.
+        # No-volume windows are neutral; this is a new research contract.
+        vol_mean = df["volume"].rolling(VOLUME_WINDOW).mean()
+        out["vol_rel"] = (df["volume"] / vol_mean.replace(0.0, np.nan)).where(
+            vol_mean != 0.0, 1.0
+        )
+    elif df["volume"].gt(0).any():
         vol_mean = df["volume"].rolling(VOLUME_WINDOW).mean().replace(0.0, np.nan)
         out["vol_rel"] = df["volume"] / vol_mean
     else:
@@ -395,7 +407,7 @@ def _build_features_segment(
         (future_close > entry).astype(float),
     )
 
-    out["feature_version"] = FEATURE_VERSION
+    out["feature_version"] = feature_version
     required = list(FEATURE_COLUMNS)
     if extra_vol:
         _range_vol_features(out, open_, high, low, close)

@@ -13,6 +13,18 @@ REAL_ORDER_BLOCKED_EXIT = 3
 PENDING_ORDER_FILE = "order_submission_pending.json"
 
 
+def reject_legacy_real_mode(mode: str) -> None:
+    """The binary research runner has no validated portfolio-risk adapter.
+
+    Its internal recovery code is retained for research regression tests;
+    funded execution now belongs to the unified proposal/risk service.
+    No environment variable or CLI acknowledgement bypasses this boundary.
+    """
+    if mode == "real":
+        raise ValueError("legacy FX-binary REAL execution is quarantined; use the ATLAS "
+                         "proposal/risk service after validating a compatible strategy and broker")
+
+
 class PendingSubmissionError(ValueError):
     """A previous REAL submission needs operator reconciliation."""
 

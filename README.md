@@ -1,126 +1,142 @@
 # ATLAS
 
-A Python toolkit for researching short-horizon FX direction and checking whether model predictions translate into executable binary-option contracts.
+**AI-assisted quantitative trading research engine.** Inspect evidence, compare strategies, simulate trades, and prepare immutable order proposals through MCP. Deterministic code owns portfolio truth, risk limits, approval verification and order recovery.
 
-ATLAS combines candle storage, causal features, calibrated models, expected-value signal rules, and a validation harness that accounts for overlapping labels and correlated trades. An optional IQ Option adapter exposes market data and guarded account operations through MCP. You can explore the core pipeline locally without a broker account.
+ATLAS includes an offline paper broker, a strategy registry, a durable execution journal, and restricted Robinhood adapter code. **It is a development platform, not a live-ready trading product.** The historical models do not yet have sufficient independently verified evidence to justify funded trading.
 
-## Start with the offline demo
+## Try it without an account
 
-Prerequisites: Git, **uv**, and Python **3.12 or later**. uv can provision a compatible Python interpreter when needed. Installing dependencies requires an internet connection; running the demo does not.
+Requires Git, [uv](https://docs.astral.sh/uv/), and Python 3.12+. Dependency installation needs internet access; these examples use generated data offline.
 
 ```bash
 git clone https://github.com/Noctilucenty/ATLAS.git
 cd ATLAS
 uv sync --locked --group dev
-uv run python demo.py
-uv run python -m pytest -q
+uv run --locked python -m atlas demo
+uv run --locked python -m pytest -q -ra
 ```
 
-The demo uses deterministic **synthetic candles** to exercise the storage, feature, and walk-forward prediction pipeline. It writes a readable `report.md`, a machine-readable `report.json`, and the generated `candles.parquet` to `output/offline-demo/`.
+The platform demo analyzes generated bars, checks a one-share proposal and fills it in an **in-memory paper account**. It starts no listener, broker session, persistent worker or startup job. Selected output:
 
-No credentials, broker connection, historical-data download, or frozen research model is needed. The demo is an engineering example: its predictions and metrics do not measure a financial edge or reproduce the registered research. Outputs are kept separate from the operational databases and research artifacts.
+```json
+{
+  "evidence_kind": "synthetic",
+  "real_orders": 0,
+  "direction": "buy",
+  "confidence": null,
+  "risk_passed": true,
+  "status": "filled"
+}
+```
 
-The development group includes LightGBM and Optuna for the synthetic model tests. For historical-data research modules, the optional research extra also supplies the HistData downloader:
+For the separate feature/training example:
 
 ```bash
-uv sync --locked --group dev --extra research
+uv run --locked python demo.py
 ```
 
-Installing these dependencies does not run an experiment. Before conducting research, read the protocol and experiment record linked below.
+That example generates 2,400 candles and writes `report.md`, `report.json` and `candles.parquet` beneath `output/offline-demo/`. Its synthetic metrics are an engineering demonstration, not market performance. Neither example loads the frozen research pickles or tracked legacy journal. Default tests skip private datasets; an explicitly selected `ATLAS_TEST_DATASET` is opened read-only.
 
-`uv.lock` pins the new development environment. The older `requirements.lock` is retained as historical provenance; it contains a machine-specific broker-library path and is not a portable installation file. Frozen model artifacts may need their original dependency versions.
+## Architecture
 
-The test suite skips private datasets by default. To explicitly smoke-test a local copy, set `ATLAS_TEST_DATASET=/absolute/path/to/copy.duckdb` and run `uv run python -m pytest tests/test_features.py::test_real_dataset_if_available`. The selected database is opened read-only.
-
-Deployment is intended for a server. This checkout is for development; the offline quickstart installs no startup jobs or application services. See [server readiness](docs/server-readiness.md) before configuring a host.
-
-The Python runtime supports an external state directory via `ATLAS_STATE_DIR`, with separate overrides for models, the environment file, and backups. Inspect the resolved paths without starting an application or creating directories:
-
-```bash
-uv run --locked python runtime_paths.py
+```mermaid
+flowchart TD
+    User[User] --> AI[AI assistant / MCP client]
+    AI --> MCP[ATLAS scoped tools and resources]
+    MCP --> Research[Strategy registry and evidence]
+    Research --> Proposal[Immutable proposal and evidence hash]
+    Human[Trusted operator outside MCP] --> Receipt[Expiring signed receipt]
+    Receipt --> Gate[Execution policy and risk checks]
+    Proposal --> Gate
+    Gate --> Ledger[Commit durable intent and client UUID]
+    Ledger --> Recheck[Recheck account, market, limits and approval]
+    Recheck --> Broker[Broker adapter]
+    Broker --> Reconcile[Validate acknowledgement and reconcile]
+    Reconcile --> Ledger
+    Ledger --> Analytics[Audited history and performance]
+    External[Untrusted external text] -. attributed context only .-> Research
 ```
 
-The supervisor requires an explicit `--mode paper`, `--mode practice`, or `--mode real` (`--paper` remains an alias). Real execution also requires `IQ_ALLOW_REAL=1` and an explicit finite positive `--amount` in the account's currency. These are future server runtime choices, not part of the offline quickstart. Watchdog recovery and dashboard startup are also opt-in. Server process management and deployment remain unconfigured.
+There is no generic broker-request proxy or MCP approval issuer. An LLM cannot supply a probability, change risk policy, register executable code, clear uncertainty, or manufacture approval.
 
-## What is in the repository
+## MCP workflow
 
-| Component | Entry points | Purpose |
-|---|---|---|
-| Offline example | [`demo.py`](demo.py) | Run the pipeline on generated data and inspect its outputs |
-| Data layer | [`storage.py`](storage.py), [`validation.py`](validation.py), [`collector.py`](collector.py) | Store and deduplicate candles in DuckDB, validate OHLC data, report gaps, and collect broker data when configured |
-| Features and training | [`features.py`](features.py), [`train.py`](train.py) | Construct features and labels; train, calibrate, freeze, and predict across chronological folds |
-| Pooled research | [`research_pooled.py`](research_pooled.py), [`research_meta.py`](research_meta.py) | Build cross-asset features and evaluate a second model that filters candidate signals |
-| Statistical checks | [`validation_stats.py`](validation_stats.py), [`acceptance_report.py`](acceptance_report.py) | Account for dependent trades, multiple experiments, calibration, and sample size |
-| Experiment history | [`registry.py`](registry.py), [`research_registry.jsonl`](research_registry.jsonl) | Record experiment families and trial counts |
-| Frozen forward test | [`FORWARD_TEST.md`](FORWARD_TEST.md), [`forward_eval.py`](forward_eval.py) | Define and evaluate the pre-registered hypotheses under their original rules |
-| Broker integration | [`server.py`](server.py), [`instruments.py`](instruments.py), [`execution_guard.py`](execution_guard.py) | Expose MCP tools, resolve instrument identifiers, and guard order execution |
-| Operational tools | [`supervisor.py`](supervisor.py), [`mission_control.py`](mission_control.py), [`journal.py`](journal.py) | Coordinate collection and explicitly selected sessions, inspect health, and reconcile broker outcomes |
-| Tests | [`tests/`](tests/) | Check pipeline behavior, leakage boundaries, evaluation criteria, and operational guards |
-
-Research modules also cover historical replication, era holdouts, OTC/spot comparisons, spread sensitivity, and calibration. Their results and rejected approaches are indexed in [`FINDINGS.md`](FINDINGS.md).
-
-## How a signal is formed
-
-The research pipeline estimates the probability of an upward price move over a specified horizon. Chronological calibration uses validation blocks inside the training window; the subsequent test window stays separate.
-
-For a binary contract with a profit payout of `r` per unit staked, the decision rule computes:
+The default **research** interface has 21 tools and seven read-only resources. For example:
 
 ```text
-call_EV = p_up × r − (1 − p_up)
-put_EV  = (1 − p_up) × r − p_up
+atlas_analyze_symbol(symbol="NVDA")
+atlas_explain_signal(signal_id="<server-produced ID>")
+atlas_check_trade_risk(signal_id="<server-produced ID>", quantity="1")
 ```
 
-A signal must clear the configured expected-value margin. A lower payout therefore requires a higher estimated chance of winning. Some registered hypotheses also apply a meta-model that scores the candidate signal's context. These are model-based estimates; broker acceptance, the actual contract expiry, and observed outcomes are separate measurements.
+Without a configured dataset, NVDA analysis reports `available: false`. It does not invent a forecast or read prices from the assistant's prose. With configured bars, momentum and mean reversion remain independently visible; their price-distance scores are not calibrated probabilities.
 
-The validation code uses chronological purges to keep overlapping labels out of training/test boundaries, removes overlapping trades per asset, and groups simultaneous cross-asset activity for statistical analysis. The registered test fixes its hypotheses and multiplicity correction in advance.
+In explicitly configured paper mode, four additional proposal/reconciliation tools are available. Two execution tools require an additional registration flag. The same service implements a future live-assisted flow:
 
-## What the available evidence supports
+```text
+AI:       atlas_create_trade_proposal(signal_id, quantity, idempotency_key)
+Operator: inspect the immutable proposal and confirm its exact hash outside MCP
+AI:       atlas_execute_trade_proposal(proposal_id, receipt)
+ATLAS:    verify receipt, persist intent, recheck evidence/account/risk, submit once
+```
 
-The tracked research notes contain historical results and audit corrections through July 2026. The checkout includes three historical model pickles (`h2-20260722.pkl`, `h4-20260722.pkl`, and `meta-h3.pkl`) and a small legacy `journal.db`. It does not include the full `market.duckdb` history or live execution logs needed to reproduce the reported results, establish a completed forward-test verdict, or verify a live trading edge. The model snapshots require their provenance, cutoff constraints, and dependency compatibility to be checked before use.
+A generic “yes” is not an approval receipt. Changed terms, account currency, policy, evidence, expiry or price can invalidate an approved proposal. Repeated execution returns the stored intent; unknown acknowledgement requires reconciliation and is never automatically retried. Cancellation has its own immutable proposal and approval. See the complete [tool and resource catalog](docs/platform-report.md#mcp-capability-catalog).
 
-The model pickles and journal remain tracked despite matching `.gitignore`; use `git ls-files` when inspecting the repository inventory. The offline demo and default tests do not load these model snapshots or the journal.
+## Execution modes and risk
 
-Two later findings are especially relevant when reading earlier win-rate claims:
-
-| Recorded finding | Limit on interpretation |
+| Mode | Behavior |
 |---|---|
-| The July 29 tradeability audit reported **14 accepted orders from 259 signals**. All 214 signals in the 20–21 UTC rollover hours were unexecutable. | A blended candle win rate includes signals the broker would not accept. The tradeable-hours subset had only 45 scored signals and was too small for a firm conclusion. |
-| The July 28 expiry audit reported broker agreement of **13/13** after applying the broker's snapped expiry, versus **10/13** under the registered 15-bar label. | This identifies a contract-timing mismatch in a small sample. It does not establish general execution fidelity or profitability. |
+| `research` (default) | Analysis only; an unconfigured portfolio is unavailable |
+| `paper` | Explicit synthetic account and quotes; persistent simulator or in-memory demo |
+| `live-assisted` | Code path requires live opt-in and exact operator-issued approval |
+| `live-auto` | Code path requires separate live and automatic opt-ins plus server policy |
 
-These are **repository-reported observations**, not results reproduced by the offline demo. Read the accompanying sample sizes, corrections, and caveats in [`FORWARD_TEST.md`](FORWARD_TEST.md). Older references to expected verdict dates, running hosts, or pending measurements describe the state when those notes were written; they are not a current operational status report.
+**The CLI factory currently refuses both live modes.** Production transport, complete verified risk data and a validated signal provider are still missing. Setting environment flags cannot overcome these implementation blockers.
 
-## Research protocol and reading order
+Pre-trade checks cover expected account and account type, cash/buying power, order/position/concentration caps, daily loss and attempt limits, strategy and symbol permissions, confidence, signal/account/quote freshness, market status, liquidity, lot size, spread, limit/slippage, pending orders and the kill switch. Unknown required data fails a check. Scope-separated SQLite journals commit intent before submission and retain uncertain state across restart.
 
-1. [`FORWARD_TEST.md`](FORWARD_TEST.md) governs the frozen hypotheses, configuration, evaluation rules, and the pre-committed power rule. The registered evaluation is permitted **once**; it is not an onboarding command.
-2. [`FINDINGS.md`](FINDINGS.md) records historical experiments, rejected ideas, implementation defects, and operational lessons. Its early conclusions should be read alongside the later protocol audits.
-3. [`RESEARCH_QUEUE.md`](RESEARCH_QUEUE.md) records candidate follow-up work and the boundaries around the existing test.
-4. [`research_registry.jsonl`](research_registry.jsonl) records experiment families used in trial-count accounting.
+See [security boundaries](docs/security.md) and [server preparation](docs/server-readiness.md) for authentication, secrets, shutdown, durable storage and recovery limits.
 
-Keep new engineering examples separate from frozen models and forward evidence. A new research experiment belongs in the registry; new hypotheses require their own registration and fresh evaluation data. Do not retune a frozen hypothesis against its forward window.
+## Broker support
 
-## Optional broker integration
-
-The broker adapter uses the separately installed, unofficial [`iqoptionapi`](https://github.com/iqoptionapi/iqoptionapi) library, whose maintainers caution against real-account use. It is not needed for the offline demo. Broker workflows additionally need account credentials, appropriate collected data, and compatible model artifacts. The included historical pickles do not establish that a fresh clone is ready for operation.
-
-For explicit PRACTICE-account use, copy [`.env.example`](.env.example) to the gitignored `.env` file and supply the broker credentials there. Keep these settings:
-
-```dotenv
-IQ_DEFAULT_BALANCE=PRACTICE
-IQ_ALLOW_REAL=0
-```
-
-The runner and supervisor support these explicit selections:
-
-| Mode | Order behavior | Required stake selection |
+| Adapter | Implemented now | Remaining boundary |
 |---|---|---|
-| `paper` | Log predictions; place no orders | `--amount` is rejected |
-| `practice` | Place orders on the PRACTICE balance | Defaults to 1 account-currency unit; `--amount` may override it |
-| `real` | Place orders on the REAL balance only with `IQ_ALLOW_REAL=1` | An explicit finite positive `--amount` is required |
+| Paper | Offline cash/positions, limit fills, fees, resting orders, cancellation and durable restart | Synthetic assumptions; no real queue, depth or latency |
+| Official Robinhood Crypto REST V2 | Strict account/holdings/quote/order mapping, limit submission/cancel/status through injected signer and transport; fake contract tests | No configured network client; required cash/equity/liquidity/session evidence unavailable |
+| Official Robinhood Agentic MCP | Verified public endpoint/OAuth metadata; pinned discovery-schema validator | Authenticated schemas, consent, transport and execution mapping unverified |
+| Legacy IQ Option | Existing FX-binary research and practice internals retained | Unofficial library; MCP order mutations removed and legacy REAL runner/supervisor refused |
 
-The runner selects its balance from the CLI mode and checks it again before every order. An unexpected or unreadable balance blocks that order. Real signals, heartbeats, cross-sections, and supervisor logs live beneath `logs/real/`; the frozen paper/practice evidence stays at its historical paths. One account-currency unit does not necessarily mean one US dollar.
+Robinhood publicly documents an official Agentic MCP service for equities, options and crypto, alongside its Crypto REST API. This was verified on September 9, 2026; it does not establish this user's entitlement or connectivity. Read the [primary-source integration research](docs/robinhood-research.md) for authentication, rate limits, terms and unsupported assumptions.
 
-Each real runner submission first creates `logs/real/order_submission_pending.json`. An unknown acknowledgement or crash during submission leaves this marker in place and blocks automatic restarts. Reconcile the exact submission against broker history before manually clearing a remaining marker; neither the supervisor nor a successful restart clears it for you. See [server readiness](docs/server-readiness.md) for the recovery boundary and verification limits.
+## What the research establishes
 
-`server.py` reads `.env` when its process starts. Its MCP tools cover connection status, market data, payouts, and guarded order operations. Only one trading runner should control a given account at a time. The local development work has not enabled a funded account, connected to the broker, or placed an order.
+The repository contains three historical FX-binary model snapshots and research ledgers, but lacks the full market database and operational logs needed to reproduce the recorded edge. Historical candidate win rates include rejected orders; the recorded practice sample is small and clustered. There is no verified funded-live result here. **ATLAS has not demonstrated that its current model beats simple baselines after realistic costs.**
 
-[`WINDOWS_SETUP.md`](WINDOWS_SETUP.md) and the operational scripts document the earlier host setup. Paths, scheduled jobs, and host state in those records need to be checked for the machine being configured. Cloning the repository or running the offline quickstart does not start a collector, supervisor, or trading session.
+The [quantitative audit](docs/quantitative-audit.md) traces leakage, selection, contract and sample-size limitations. This batch adds opt-in causal features `2.0.0`, builds cross-asset context before future-label filtering, strengthens chronological validation, and compares fixed momentum/mean-reversion rules with buy-and-hold and a seeded random control using explicit costs. Only synthetic fixtures were evaluated; no market-data winner was selected.
+
+The original feature version `1.3.0`, frozen models, research ledgers and [one-time forward protocol](FORWARD_TEST.md) remain unchanged. Do not run that evaluator as an onboarding test or tune against its reserved observations. [FINDINGS.md](FINDINGS.md) is historical evidence, not current host status.
+
+## Project map
+
+| Area | Files |
+|---|---|
+| Contracts and orchestration | `atlas/domain.py`, `atlas/service.py`, `atlas/risk.py` |
+| Durable execution and approvals | `atlas/ledger.py`, `atlas/approval.py` |
+| AI interface and configuration | `atlas/mcp_server.py`, `atlas/config.py`, `atlas/__main__.py` |
+| Broker boundaries | `atlas/brokers/` |
+| Research and analytics | `atlas/strategies.py`, `atlas/analytics.py`, `atlas/evidence.py`, `atlas/research_features.py`, `atlas/validation.py` |
+| Existing quantitative pipeline | `storage.py`, `features.py`, `train.py`, `research_*.py`, `validation_stats.py` |
+| Operational compatibility | `supervisor.py`, `live_h2_runner.py`, `runtime_paths.py`, `settle_missing.py` |
+| Offline verification | `tests/` |
+| Inert server examples | `deploy/`; nothing installed or started |
+
+`uv.lock` is the reproducible development lock. Historical `requirements.lock` contains a machine-specific optional broker path and is retained for provenance. The optional `research` extra supplies additional dependencies; installing it does not authorize a new experiment.
+
+## Next work
+
+1. Recover canonical data, timestamped execution costs and untouched evaluation evidence; test simple baselines before adding ensemble complexity.
+2. Verify official authenticated Robinhood schemas with the account owner and implement a narrowly mapped transport and complete market/account provider.
+3. Build a pinned, calibrated signal-provider contract and validate it on fresh chronological data for the intended asset and execution product.
+4. Rehearse Linux shutdown, uncertain-order recovery and encrypted backup restore on a separately authorized server before considering funded activation.
+
+The [implementation report](docs/platform-report.md) records the audit, capabilities, local tests, security review and remaining blockers. No deployment, broker login, funded order or GitHub push occurred.
