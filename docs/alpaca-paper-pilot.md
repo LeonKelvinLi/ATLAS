@@ -138,6 +138,12 @@ Provider contracts:
 
 ## Current execution receipt
 
+**Setup is complete for the bounded connectivity test, but the broker lifecycle
+test has not passed. Both attempts were rejected, neither produced an accepted
+order, and the pilot is halted with no submission attempts remaining.** The
+account still has $100 simulated cash and no positions. Automatic strategy
+trading and real-money trading remain disabled.
+
 The initial implementation passed 1,454 tests, with two existing optional skips,
 in 167.97 seconds. All eight frozen research artifacts were unchanged.
 
@@ -151,5 +157,33 @@ was found. The attempt remains recorded and halted.
 
 Receipts and test output are outside Git in
 `/Users/leon/Desktop/dev/ATLAS-research-evidence/alpaca-paper-pilot-20260910`.
-The corrective test has not yet run. The earlier $100 account/API check is
-recorded in [the connection report](alpaca-paper-connection.md).
+
+The revised implementation at `7ffad70` passed **1,509 tests with two existing
+optional skips** in 25.91 seconds. On September 10 at 16:33:31 UTC, its one
+corrective request attempted 0.000026393 BTC at $75,324.76, reserving
+$1.99997466902408 including modeled fees. Alpaca returned **HTTP 403, provider
+code 40310000**. The retained diagnostic category is `other`; the raw provider
+message was not retained, so the specific refusal reason is still unknown.
+Price precision was not established as the cause of either rejection.
+
+Reads at 16:33:48 UTC showed account and crypto status ACTIVE, account/trading
+blocks false, cash/equity/non-marginable buying power $100, and empty positions,
+order history and activities. No broker order ID, accepted order, fill or
+cancellation was observed. Both request IDs, their rejection audit records and
+the combined $3.999910387358886 modeled reservation remain preserved. Subsequent
+missing lookups leave the active intent's recovery state `unknown`; they do not
+erase the recorded HTTP refusal or authorize another submission.
+
+A read-only Chrome check of the same paper account's Configure page at about
+16:37 UTC showed Trades Suspended off and Fractional Trading on. No account
+settings were changed. The public [status page](https://status.alpaca.markets/)
+reported the paper Order API operational at 16:39 UTC. These observations do not
+explain the refusal. The [account configuration contract](https://docs.alpaca.markets/us/reference/getaccountconfig-1)
+documents suspension and fractional-trading settings; the dashboard agrees with
+the earlier active account snapshot.
+
+The next step is provider diagnosis using the
+[prepared support draft](alpaca-paper-support-draft.md), which has **not been
+sent**. Do not reset the journal, replenish the attempt budget, raise the paper
+balance or submit another order to recover an error message. The earlier $100
+account/API check is recorded in [the connection report](alpaca-paper-connection.md).

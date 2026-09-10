@@ -179,8 +179,10 @@ research/model/journal hashes are unchanged. Full output is retained in
 Ongoing strategy execution still needs complete durable order and activity
 reconciliation, an established $100 funding baseline or allocation ledger,
 fees/realized-P&L accounting and a genuine prospective data/strategy protocol.
-The separate [bounded paper pilot](alpaca-paper-pilot.md) implements a single
-connectivity order and cancellation with an irreversible attempt cap. It does not
+The separate [bounded paper pilot](alpaca-paper-pilot.md) implements a connectivity
+order and cancellation with an irreversible attempt cap and one recorded
+correction after proven rejection. Both broker attempts were refused, so its
+lifecycle test remains incomplete. It does not
 assemble the ongoing strategy service or invent missing P&L and fee measures.
 The ATLAS deployment factory remains unavailable for real broker operations;
 the read-only preflight is not an execution adapter and does not install a worker.
