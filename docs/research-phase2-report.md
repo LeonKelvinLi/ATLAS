@@ -176,9 +176,13 @@ was accessed in this phase.
 ## J. Git state
 
 Work is on `codex/atlas-offline-onboarding`; implementation and final verification
-are committed locally. Exact commits and ahead/behind state are recorded in the
-verification section. Nothing is pushed. The eight frozen files are byte-verified
-against the pre-change baseline.
+are committed locally. The implementation commit is
+`c381f5d25e1b7cdddd6d48bc66d8b319a646f12d`; this report has a subsequent documentation-only
+commit. With that report commit the branch is six commits ahead and zero behind
+`origin/main`. The remote main SHA was verified read-only as
+`9800677ec1a5fa7a1c53e3e4e6b1554ea8085378`; no matching remote development branch or
+upstream tracking branch exists. Final handoff verifies a clean working tree.
+Nothing is pushed. The eight frozen files are byte-verified against the baseline.
 
 ## K. Ranked next work
 
@@ -197,3 +201,36 @@ against the pre-change baseline.
 
 Avoid new model families, optimization layers or dashboards until these steps
 resolve the evidence gaps they would otherwise hide.
+
+## Retained engineering evidence
+
+The following command completed successfully from the clean implementation
+commit and reproduced identical canonical artifacts:
+
+```bash
+uv run --locked python -m atlas research demo \
+  --store /Users/leon/Desktop/dev/ATLAS-research-evidence/phase2-synthetic-20260909
+```
+
+Experiment: `exp_ecfe8d6ded7e40a7b77fcf6c911e220f`.
+Result hash: `610e8e8d31efd6be5bc20fb7d80b25d2219c797e285f4dfb41fed8e73e9d5b40`.
+Evidence: **SYNTHETIC / EXPERIMENTAL**; one completed attempt with 37 planned and
+37 evaluated trials in this new store, no submitted trade. This is not a record
+of 37 independently validated market strategies.
+
+The [immutable manifest](/Users/leon/Desktop/dev/ATLAS-research-evidence/phase2-synthetic-20260909/results/exp_ecfe8d6ded7e40a7b77fcf6c911e220f/manifest.json)
+and [scorecard](/Users/leon/Desktop/dev/ATLAS-research-evidence/phase2-synthetic-20260909/results/exp_ecfe8d6ded7e40a7b77fcf6c911e220f/scorecard.json)
+are among 39 exported files (1,569,973 bytes total). The fixture, SQLite registry
+and complete bundle remain outside Git. They contain no real market or account data.
+
+```bash
+uv run --locked python -m atlas research reproduce \
+  --experiment-id exp_ecfe8d6ded7e40a7b77fcf6c911e220f \
+  --store /Users/leon/Desktop/dev/ATLAS-research-evidence/phase2-synthetic-20260909 \
+  --dataset /Users/leon/Desktop/dev/ATLAS-research-evidence/phase2-synthetic-20260909/synthetic-dataset.json
+```
+
+Exact reproduction is scoped to the pinned source bytes, data and runtime.
+Future implementation changes correctly refuse this experiment until its original
+implementation is restored. A documentation-only commit is explicitly disclosed
+and accepted when actual implementation hashes still match.
