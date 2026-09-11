@@ -4,6 +4,12 @@ These examples are inert files. No service, daemon, broker session, startup
 job, or network listener has been installed or started. The intended eventual
 host is a separate Linux server; this Mac remains a development checkout.
 
+The separate [Coinbase paper simulator](../docs/coinbase-simulation.md) has a
+[bounded Linux service template](atlas-coinbase-simulation@.service.example).
+It uses public outbound HTTPS and its own external synthetic journal. It does
+not use the generic MCP service or a real trading adapter. No host is selected
+and the template is not installed.
+
 ## CLI surface
 
 - `python -m atlas` prints help and creates no state.

@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "product_id": "BTC-USD",
+  "allocation_usd": "100",
+  "order_budget_usd": "10",
+  "taker_fee_bps": null,
+  "slippage_bps": "5",
+  "max_loss_usd": "5",
+  "daily_loss_usd": "5",
+  "short_window": 5,
+  "long_window": 20,
+  "entry_threshold_bps": "25",
+  "interval_seconds": 5,
+  "strategy": "sma_reference_v1"
+}

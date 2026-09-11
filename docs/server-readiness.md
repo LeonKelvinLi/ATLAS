@@ -17,10 +17,13 @@ deployment. Its provider receipt is separate from the offline verification and
 from general broker or live readiness.
 
 The [Coinbase extension](coinbase-integration.md) adds public BTC-USD cost
-previews and a separate view-only account preflight. Its $100 budget is a
+previews, a separate view-only account preflight, and a dedicated
+[bounded local simulation](coinbase-simulation.md) with a persistent journal.
+Its $100 budget is a
 simulation input, not Coinbase cash or a funded allocation. These GET-only
 clients expose no order or transfer methods and do not activate this service
-factory. An authenticated preflight requires a separately selected portfolio
+factory. The simulator records local assumed fills and cannot submit orders.
+An authenticated preflight requires a separately selected portfolio
 and a key with View only; account connection is distinct from public-data access.
 
 The complete inert examples and configuration contract are in [`deploy/README.md`](../deploy/README.md), [`research-config.example.json`](../deploy/research-config.example.json), and [`atlas.service.example`](../deploy/atlas.service.example). These are source files, not installed host configuration.

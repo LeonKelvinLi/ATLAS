@@ -1,0 +1,39 @@
+# Inert Linux template; an instance name supplies a unique immutable run receipt.
+# Requires explicit external config and a newly refreshed View-only fee report.
+[Unit]
+Description=ATLAS bounded Coinbase paper simulation (%i)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/atlas-coinbase/simulation.json
+ConditionPathExists=/var/lib/atlas-coinbase/fee-report.json
+
+[Service]
+Type=oneshot
+User=atlas
+Group=atlas
+WorkingDirectory=/opt/atlas
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/atlas/.venv/bin/python scripts/coinbase_simulation.py --config /etc/atlas-coinbase/simulation.json --journal /var/lib/atlas-coinbase/paper.sqlite3 run --samples 60 --fee-report /var/lib/atlas-coinbase/fee-report.json --output /var/lib/atlas-coinbase/receipts/%i.json
+StateDirectory=atlas-coinbase
+StateDirectoryMode=0700
+UMask=0077
+Restart=no
+TimeoutStartSec=15min
+TimeoutStopSec=35
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+ReadWritePaths=/var/lib/atlas-coinbase
+StandardOutput=journal
+StandardError=journal
+
+# No Install section or timer: each finite campaign is explicitly invoked.

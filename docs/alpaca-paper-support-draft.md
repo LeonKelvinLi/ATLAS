@@ -2,8 +2,13 @@
 
 Sent to `support@alpaca.markets` after Leon continued the prepared request.
 Gmail returned the `SENT` label. The external evidence directory contains
-`support-sent-receipt.json`; delivery, support acknowledgement and resolution
-have not yet been verified. The body below was sent as plain text.
+`support-sent-receipt.json`. On September 11, a separate forwarded-request
+thread received ticket **353754**: an acknowledgement at **16:28:52 UTC** and
+an explicitly AI-generated reply at **16:32:46 UTC**. The reply gives generic
+possibilities and requests diagnostics; it does not diagnose or resolve this
+rejection. See the [reply in Gmail](https://mail.google.com/mail/#all/1a0915080e7a484a)
+and the [prepared, unsent human escalation](alpaca-paper-support-followup.md).
+The original body below was sent as plain text.
 
 Subject: Paper BTC/USD limit order rejected with 40310000 despite active account and $100 buying power
 

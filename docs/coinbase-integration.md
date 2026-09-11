@@ -254,6 +254,14 @@ access, but configuring it does not itself move or reserve the proposed funds.
 
 ## Engineering boundary
 
+September 11 extension: the [bounded local simulation](coinbase-simulation.md)
+adds an external persistent $100 synthetic account, a prior-observation SMA
+reference, fee/depth/slippage accounting, sticky loss halts, consistent backup
+and restart checks. It runs through its own explicit CLI and remains separate
+from the general execution service. Its forced round-trip scenario is labeled
+as an accounting test. Neither scenario establishes broker order acceptance or
+profitable strategy evidence.
+
 Keep the Coinbase public adapter separate from `BrokerAdapter` execution methods
 and from the Alpaca pilot journal. Public connection success cannot clear the
 Alpaca refusals or restore its consumed attempts. No change to the frozen IQ/FX
@@ -277,5 +285,7 @@ Authenticated Coinbase account connectivity is now verified through the
 view-only key and the selected portfolio. No code changes were needed for the
 production account response. No workers, scheduled jobs, live orders or
 transfers were started. The Alpaca pilot remains halted; its support request
-was sent separately and had no reply at the latest check. Coinbase setup does
+was sent separately. A September 11 automated reply did not diagnose the refusal;
+the [human escalation draft](alpaca-paper-support-followup.md) is prepared and
+unsent. Coinbase setup does
 not change that result.
