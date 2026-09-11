@@ -124,7 +124,7 @@ class ReplayEngine:
     """
 
     def __init__(self, bars, decisions, *, model, initial_cash="10000", state_path=None,
-                 evidence_class="SYNTHETIC"):
+                 evidence_class="SYNTHETIC", context_metadata=None, require_existing_state=False):
         if not isinstance(model, ExecutionModel) or evidence_class not in EVIDENCE:
             raise ValueError("explicit execution model and evidence class required")
         self.model, self.evidence_class = model, evidence_class
@@ -134,6 +134,10 @@ class ReplayEngine:
         self.config = {"schema_version": SCHEMA_VERSION, "execution_model": model.public(),
                        "initial_cash": str(self.initial_cash), "evidence_class": evidence_class,
                        "bars_hash": _hash(self.bars), "decisions_hash": _hash(self.decisions)}
+        if context_metadata is not None:
+            # Extensions must bind their assumptions before a checkpoint is
+            # opened, so changing risk or venue terms cannot resume old state.
+            self.config["context_metadata"] = json.loads(_json(context_metadata))
         self.run_id = _hash(self.config)
         grouped = {}
         for bar in self.bars:
@@ -150,6 +154,7 @@ class ReplayEngine:
                       "events": [], "bar_capacity_used": {}, "realized_pnl": "0",
                       "daily_realized_pnl": {}, "turnover_notional": "0", "peak_equity": str(self.initial_cash)}
         self.path, self.db, self.failed, self.closed = None, None, False, False
+        self.require_existing_state = require_existing_state
         if state_path is not None:
             self._open_state(state_path)
 
@@ -243,17 +248,20 @@ class ReplayEngine:
         path = path.resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         new = False
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            if path.stat().st_size == 0:
-                raise ValueError("existing empty replay state requires recovery")
-        else:
-            os.close(fd)
-            new = True
+        if not self.require_existing_state:
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                if path.stat().st_size == 0:
+                    raise ValueError("existing empty replay state requires recovery")
+            else:
+                os.close(fd)
+                new = True
         self.path = path
         try:
-            self.db = sqlite3.connect(path, isolation_level=None, timeout=10)
+            # mode=rw closes the disappearance race between a resume precheck
+            # and SQLite open. A resume must never reseed missing research cash.
+            self.db = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, isolation_level=None, timeout=10)
             self.db.execute("PRAGMA synchronous=FULL")
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("BEGIN IMMEDIATE")

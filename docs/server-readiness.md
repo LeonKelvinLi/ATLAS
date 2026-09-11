@@ -109,3 +109,20 @@ Root operational tools retain their existing external selectors:
 6. Have the owner approve the concrete account, limits, funding, host and activation after those requirements are met.
 
 See [`platform-report.md`](platform-report.md) for exact local test results and the final implementation inventory. Local tests do not establish server operation, broker connectivity, investment profitability or a GitHub Actions run.
+
+## September 11 multi-asset development extension
+
+The [multi-asset research workflow](multiasset-research.md) adds bounded strategy
+families, shared simulated risk, venue cost assumptions, protective exits,
+chronological validation, archived diagnostics and explicit evidence gates.
+Research runs write to new external directories and start no service. The
+existing Coinbase simulator and frozen research artifacts remain separate.
+
+Alpaca stock history was read successfully, but equity execution is still an
+[offline fixture contract](multiasset-equity-paper.md). The previous paper-order
+403 refusal is unresolved. Databento/Massive are adapter contracts, and GLD/USO
+are ETF proxies; futures and paid data have not been activated. Public Coinbase
+candles retain unknown volume units and historical publication timing. No
+strategy is promoted on those archives. Full local verification passed
+2,186 tests with two expected skips; this is engineering evidence, not a broker
+acceptance or a profitability result.

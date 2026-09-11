@@ -4,6 +4,11 @@
 
 ATLAS includes an offline paper broker, a strategy registry, a durable execution journal, and restricted Robinhood adapter code. **It is a development platform, not a live-ready trading product.** The historical models do not yet have sufficient independently verified evidence to justify funded trading.
 
+The [multi-asset research workflow](docs/multiasset-research.md) adds 59 strategy
+hypotheses for SPY/QQQ mean reversion, BTC breakouts and GLD/USO proxy trends,
+with shared risk, chronological validation, cost stress and a cash-only paper
+tournament. Historical intake and synthetic testing do not enable real orders.
+
 ## Try it without an account
 
 Requires Git, [uv](https://docs.astral.sh/uv/), and Python 3.12+. Dependency installation needs internet access; these examples use generated data offline.
