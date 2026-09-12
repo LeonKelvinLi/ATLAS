@@ -102,6 +102,7 @@ def default_plan(*,train_days=10,validation_days=5,test_days=5,embargo_seconds=3
         if type(value) is not int or value <= 0:
             raise ValueError('positive whole-day windows and fold limit required')
     return {'version':'multiasset-campaign-v1','initial_capital_usd':'100',
+            'research_purpose':'diagnostic','max_replay_evaluations':5000,
             'strategy_specs':strategy_catalog(),'risk_fractions':list(RISK_FRACTIONS),
             'train_seconds':train_days*DAY,'validation_seconds':validation_days*DAY,
             'test_seconds':test_days*DAY,'embargo_seconds':embargo_seconds,
@@ -221,8 +222,10 @@ def _archive_report(directory, name, report):
 
 
 def run_campaign(datasets, output_dir, *, plan=None, now=None, assume_archive_close=False, progress=None):
+    from atlas.research.campaign_preflight import campaign_preflight
     now=int(time.time()) if now is None else now
     plan=default_plan() if plan is None else json.loads(json.dumps(plan))
+    preflight=campaign_preflight(plan)
     specs=[normalize_spec(s) for s in plan['strategy_specs']]
     if len({s['strategy_id'] for s in specs})!=len(specs) or not 1<=len(specs)<=100:
         raise ValueError('bounded unique preregistered hypotheses required')
@@ -238,7 +241,7 @@ def run_campaign(datasets, output_dir, *, plan=None, now=None, assume_archive_cl
     (out/'reports').mkdir(mode=0o700)
     sources=source_identity()
     # Freeze source and declared search space before evaluations or ranking.
-    manifest={'created_at_utc':now,'plan':plan,'source_identity':sources,
+    manifest={'created_at_utc':now,'plan':plan,'source_identity':sources,'preflight':preflight,
               'input_payload_hashes':[digest(d) for d in datasets],
               'assume_archive_close':assume_archive_close,'historical_windows_are_retrospective':True,
               'live_approved':False,'actual_orders_submitted':0}
@@ -409,7 +412,7 @@ def run_campaign(datasets, output_dir, *, plan=None, now=None, assume_archive_cl
     portfolio['cash_only_sampling']=cash_sampling
     portfolio_ref=_archive_report(out/'reports','paper-tournament',portfolio)
     if source_identity()!=sources:raise ValueError('source changed during campaign; results cannot be certified')
-    result={'schema_version':1,'evidence_class':evidence,'fold_count':len(folds),
+    result={'schema_version':1,'evidence_class':evidence,'fold_count':len(folds),'preflight':preflight,
             'hypothesis_count':len(specs),'risk_variants':len(RISK_FRACTIONS),
             'evaluated_trial_windows':sum(r['status']=='evaluated' for f in fold_results for r in f['trials']),
             'verified_OOS_survivors':[],'synthetic_cash_allocated':'0','synthetic_cash_remaining':portfolio['portfolio']['cash'],
@@ -447,6 +450,12 @@ def render_report(result):
           '', '## Candidate results','',
           '| Fold | Candidate | Test net % | Drawdown % | Trades | Gate |',
           '|---|---|---:|---:|---:|---|']
+    if 'preflight' in result:
+        preflight=result['preflight']
+        rows[8:8]=[
+            '', f"Research purpose: {preflight['research_purpose']}. Frozen replay upper bound: {preflight['maximum_total_replays']} of {preflight['max_replay_evaluations']} permitted, including benchmarks and the cash ledger.",
+            'Outside-campaign attempt history is unknown; this receipt is not a complete historical multiple-testing correction.',
+            'Planning warnings: '+('; '.join(preflight['warnings']) or 'none; actual sample and evidence gates remain required.'), '']
     for fold in result['folds']:
         for trial in fold['trials']:
             if trial['status']!='evaluated':continue

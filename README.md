@@ -89,6 +89,10 @@ A generic “yes” is not an approval receipt. Changed terms, account currency,
 
 ## Execution modes and risk
 
+Offline research now includes [precise RSI/volume observations, exact cost
+hurdles and bounded campaign planning](docs/research-concepts.md). These tools
+retain unknown data/costs and add no order authority.
+
 | Mode | Behavior |
 |---|---|
 | `research` (default) | Analysis only; an unconfigured portfolio is unavailable |
