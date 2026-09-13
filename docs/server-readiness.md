@@ -124,5 +124,11 @@ Alpaca stock history was read successfully, but equity execution is still an
 are ETF proxies; futures and paid data have not been activated. Public Coinbase
 candles retain unknown volume units and historical publication timing. No
 strategy is promoted on those archives. Full local verification passed
-2,355 tests with two expected skips; this is engineering evidence, not a broker
+2,497 tests with two expected skips on September 13; this is engineering evidence, not a broker
 acceptance or a profitability result.
+
+The [offline coverage planner](research-concepts.md#offline-coverage-planning)
+now previews an explicit campaign plan against a verified saved archive without
+replays, output creation or a broker connection. Coverage and scheduling reports
+do not establish qualification, and original ingestion times remain visible when
+an explicit retrospective publication-time assumption is used.

@@ -222,18 +222,12 @@ def _archive_report(directory, name, report):
 
 
 def run_campaign(datasets, output_dir, *, plan=None, now=None, assume_archive_close=False, progress=None):
-    from atlas.research.campaign_preflight import campaign_preflight
+    from atlas.research.campaign_preflight import validate_campaign_plan
     now=int(time.time()) if now is None else now
-    plan=default_plan() if plan is None else json.loads(json.dumps(plan))
-    preflight=campaign_preflight(plan)
+    plan=default_plan() if plan is None else plan
+    preflight=validate_campaign_plan(plan)
+    plan=json.loads(json.dumps(plan,allow_nan=False))
     specs=[normalize_spec(s) for s in plan['strategy_specs']]
-    if len({s['strategy_id'] for s in specs})!=len(specs) or not 1<=len(specs)<=100:
-        raise ValueError('bounded unique preregistered hypotheses required')
-    if plan['risk_fractions'] != list(RISK_FRACTIONS) or plan['initial_capital_usd']!='100' or plan['live_approved'] is not False:
-        raise ValueError('fixed synthetic capital, risk grid and no live authority required')
-    if (plan['cost_multipliers']!=['1','2'] or type(plan['max_folds']) is not int or not 1<=plan['max_folds']<=10
-            or type(plan['bootstrap_resamples']) is not int or not 100<=plan['bootstrap_resamples']<=5000):
-        raise ValueError('predeclared normal/double-cost scenarios required')
     out=Path(output_dir).expanduser()
     if not out.is_absolute() or out.resolve().is_relative_to(Path(__file__).resolve().parents[2]):
         raise ValueError('absolute external campaign directory required')

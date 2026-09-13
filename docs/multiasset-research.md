@@ -117,6 +117,9 @@ zero interest. 60/40 and T-bill benchmarks require additional return series.
 Run from the repository after `uv sync --locked --group dev`:
 
 ```sh
+# Preview source coverage, missing symbols and feasible windows without replay.
+uv run --locked python scripts/multiasset_research.py --synthetic --preflight
+
 # Engineering demonstration only. No credentials, network or broker process.
 uv run --locked python scripts/multiasset_research.py \
   --synthetic --synthetic-days 12 --max-folds 2 \
@@ -128,6 +131,12 @@ uv run --locked python scripts/multiasset_research.py \
   --assume-archive-close --max-folds 2 \
   --output-dir /absolute/existing-parent/new-history-campaign
 ```
+
+Both paths also accept an explicit external `--plan` JSON instead of window/fold
+overrides. With `--preflight`, omit `--output-dir`: the command only prints its
+planning report. See [coverage planning](research-concepts.md#offline-coverage-planning)
+for the precise distinction between data coverage, information clocks, sample
+ceilings and actual research qualification.
 
 The archive must verify against raw captures first. `--assume-archive-close`
 creates separate `derived-research-bars.json`, retaining original capture times

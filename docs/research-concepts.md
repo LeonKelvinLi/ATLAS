@@ -107,7 +107,77 @@ folds and stress reruns are dependent comparisons, not independent trades or a
 complete multiple-testing correction. Reused history remains retrospective.
 No old gate, model, selection order, strategy rule or account permission changes.
 
+## Offline coverage planning
+
+`scripts/multiasset_research.py --preflight` prints a planning report without
+running signals, rankings, returns, replays or the one-time forward evaluator.
+It creates no campaign directory or ledger. Use an explicitly selected existing
+Alpaca archive or generated engineering fixtures:
+
+```sh
+uv run --locked python scripts/multiasset_research.py --synthetic --preflight
+
+uv run --locked python scripts/multiasset_research.py \
+  --archive /absolute/existing-iex-archive --preflight \
+  --plan /absolute/external/campaign-plan.json
+```
+
+`--plan` accepts the full `default_plan()` JSON contract, including a bounded
+strategy list, `research_purpose` and `max_replay_evaluations`. The same validator
+is used before a run creates output. Only the purpose and replay budget may be
+omitted, retaining their documented defaults. Plan inputs are strict UTF-8 JSON
+of at most 256 KiB in external regular files; duplicate keys, nonfinite values,
+symlinks, missing fields and unknown fields are refused. Plan files cannot be
+combined with window/fold overrides. `--output-dir` is forbidden for preflight
+and remains required for a research run.
+
+The archive verifier checks saved raw-response hashes and normalization. The
+exact dataset subsequently read is checked against that verification receipt.
+This verifies internal consistency, not independent provider authenticity.
+Preflight uses the same information-availability clock and fold scheduler as
+the campaign. A historical archive captured as one batch normally yields zero
+folds. `--assume-archive-close` explicitly previews a separate retrospective
+clock while preserving `HISTORICAL_UNVERIFIED` and original ingestion times.
+It never rewrites the input archive or establishes point-in-time evidence.
+
+The report includes missing required symbols, native-bar counts and revisions,
+unknown volume units, declared calendar coverage, missing/late event buckets,
+publication groups retained after the scheduler's outcome-horizon purge, and
+per-instrument daily-observation ceilings. Native completed-bar closes are
+counted in half-open event windows using the supplied session calendar, including
+early closes; no gap is filled. Publication-window counts, event-window coverage
+and original ingestion counts are separately labeled. Calendars and historical
+availability are still declarations. A computed fold does not establish that
+every strategy has sufficient warmup, supported aggregation or executable fills.
+
+The daily-observation ceiling counts publication UTC dates, intersecting the
+declared session dates for equities. It is an optimistic planning bound before
+strategy/execution checks, not an observed replay statistic. Completed trades,
+returns and profitability remain unknown; qualification and live approval stay
+false. A `qualification` plan must satisfy the existing elapsed-day minimum,
+but that does not guarantee enough exchange sessions or real trades.
+
+The pure planning API is `atlas.research.campaign_planning.plan_campaign`.
+Its input limit is ten explicit datasets and 100,000 total rows. Potential
+schedule windows multiplied by publication groups must not exceed five million;
+this bounds scheduling work without changing the scheduler or evaluation rules.
+Oversized plans must be narrowed explicitly. No broker API, network credential,
+model training, service or scheduled job is part of this command.
+
 ## Verification
+
+September 13, 2026: the planning addition passed **2,497 tests with two optional
+skips**, including 142 new plan-validation, coverage and CLI checks. An
+independent review caught a supported strategy-ID shorthand mismatch; the planner
+now normalizes that shorthand consistently with the campaign runner, with a
+regression check. All eight frozen artifacts and the selected prior archive and
+campaign manifests/results remained byte-identical.
+
+A read-only check of the previously saved IEX archive found zero scheduled folds
+on its acquisition clock, two under the explicit retrospective close assumption,
+and zero for a 90-day train / 90-day validation / 90-day test qualification plan.
+The stock archive has no BTC-USD data. Every report remains historically
+unverified and qualification is false; no new performance experiment was run.
 
 The 169 new tests cover fee asymmetry and denominators, unknown costs,
 calendar-month proration, double-charge prevention, causal prefixes and revisions,
