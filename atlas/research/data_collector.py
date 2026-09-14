@@ -240,12 +240,22 @@ def _alpaca_quotes(raw, receipt, contract, test, sessions):
             continue
         if type(row) is not dict or not {"bp", "ap", "bs", "as"} <= row.keys():
             raise DataCollectorError("collector_quote_shape_invalid")
-        payload = {"bid": _number(row["bp"], positive=True, numeric=True),
-                   "ask": _number(row["ap"], positive=True, numeric=True),
+        payload = {"bid": _number(row["bp"], numeric=True),
+                   "ask": _number(row["ap"], numeric=True),
                    "bid_size": _number(row["bs"], numeric=True),
                    "ask_size": _number(row["as"], numeric=True),
                    "currency": "USD", "size_unit": "round_lots"}
         event, timing = _quote_time(row.get("t"), receipt)
+        zero_sides = [side for side in ("bid", "ask") if Decimal(payload[side]) == 0]
+        if zero_sides:
+            # IEX can withdraw a side: zero price/size and a blank exchange.
+            # Keep its exact raw receipt, but admit no two-sided V1 quote.
+            # Other zero-price shapes remain invalid rather than being hidden.
+            if all(Decimal(payload[side + "_size"]) == 0
+                   and row.get("bx" if side == "bid" else "ax") in ("", " ")
+                   for side in zero_sides):
+                continue
+            raise DataCollectorError("collector_number_invalid")
         payload.update(timing)
         session = sessions.get(datetime.fromtimestamp(event, NY).date().isoformat())
         records.append(_record(contract, receipt, test, kind="quote", symbol=symbol, event=event,

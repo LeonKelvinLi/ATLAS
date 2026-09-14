@@ -401,6 +401,61 @@ def test_alpaca_current_quote_does_not_borrow_historical_calendar_session():
     assert "session_metadata_unknown" in validate_record(quote, contract(), tomorrow)["quality"]["blockers"]
 
 
+def test_alpaca_close_withdrawn_asks_keep_final_bars_and_exact_quote_receipt():
+    closing = int(datetime(2026, 9, 14, 20, 0, tzinfo=timezone.utc).timestamp())
+    quotes = {"quotes": {
+        "QQQ": {"ap": 0, "as": 0, "ax": " ", "bp": 709.36, "bs": 280,
+                "bx": "V", "t": "2026-09-14T20:00:59.916362115Z"},
+        "USO": {"ap": 0, "as": 0, "ax": " ", "bp": 151.32, "bs": 100,
+                "bx": "V", "t": "2026-09-14T20:00:05.538115756Z"},
+        "SPY": {"ap": 781.87, "as": 40, "ax": "V", "bp": 736.25, "bs": 40,
+                "bx": "V", "t": "2026-09-14T20:00:00.005351580Z"},
+    }}
+    raw = encoded(quotes)
+    bars = {symbol: [bar(closing - 300)] for symbol in module.EQUITIES}
+    fake = Transport([[{"date": "2026-09-14", "open": "09:30", "close": "16:00"}],
+                      {"bars": bars, "next_page_token": None}, raw])
+    result = collect_once(contract(), provider="alpaca", start=closing - 300,
+                          end=closing, transport=fake, clock=lambda: closing + 75)
+    admitted_bars = [row for row in result["records"] if row["record_type"] == "bar"]
+    admitted_quotes = [row for row in result["records"] if row["record_type"] == "quote"]
+    assert {row["symbol"] for row in admitted_bars} == set(module.EQUITIES)
+    assert all(row["event_time"] == closing for row in admitted_bars)
+    assert [row["symbol"] for row in admitted_quotes] == ["SPY"]
+    assert result["captures"][-1]["body"] == raw
+    assert all(row["acquisition_kind"] == "test" for row in result["records"])
+    assert all(Decimal(row["payload"][side]) > 0 for row in admitted_quotes for side in ("bid", "ask"))
+
+
+@pytest.mark.parametrize("absent_sides", [("bid",), ("ask",), ("bid", "ask")])
+def test_alpaca_unavailable_quote_sides_are_missing_even_during_open_session(absent_sides):
+    quote = {"bp": 100, "ap": 101, "bs": 2, "as": 3, "bx": "V", "ax": "V"}
+    for side in absent_sides:
+        prefix = "b" if side == "bid" else "a"
+        quote.update({prefix + "p": 0, prefix + "s": 0, prefix + "x": " "})
+    raw = encoded({"quotes": {"SPY": quote}})
+    fake = Transport([CALENDAR, {"bars": {"SPY": [bar()]}, "next_page_token": None}, raw])
+    result = collect_once(contract(), provider="alpaca", start=START, end=END,
+                          transport=fake, clock=lambda: NOW)
+    assert [row["record_type"] for row in result["records"]] == ["bar"]
+    assert result["captures"][-1]["body"] == raw
+
+
+@pytest.mark.parametrize("changes", [
+    {"as": 1}, {"ax": "V"}, {"ax": None}, {"ax": "\t"}, {"ap": False},
+    {"as": False}, {"bp": -1}, {"bs": -1}, {"ap": "0"}, {"t": "invalid"},
+])
+def test_withdrawn_side_shape_does_not_hide_malformed_quotes(changes):
+    quote = {"bp": 100, "ap": 0, "bs": 2, "as": 0, "bx": "V", "ax": " "}
+    quote.update(changes)
+    raw = encoded({"quotes": {"SPY": quote}})
+    fake = Transport([CALENDAR, {"bars": {"SPY": [bar()]}, "next_page_token": None}, raw])
+    with pytest.raises(DataCollectorError) as caught:
+        collect_once(contract(), provider="alpaca", start=START, end=END,
+                     transport=fake, clock=lambda: NOW)
+    assert caught.value.captures[-1]["body"] == raw
+
+
 @pytest.mark.parametrize("quotes", [
     {"quotes": {"AAPL": {}}}, {"quotes": []}, {"quotes": {"SPY": {}}},
     {"quotes": {"SPY": {"bp": 101, "ap": 100, "bs": 1, "as": 2}}},

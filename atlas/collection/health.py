@@ -17,7 +17,7 @@ def market_state(provider, now, coverage):
     if not day:
         return "unknown"
     sessions = [session for row in day for session in row["sessions"] if session["session_date"] == today]
-    return "open" if any(row["open_time"] <= now <= row["close_time"] + 900 for row in sessions) else "closed"
+    return "open" if any(row["open_time"] <= now < row["close_time"] for row in sessions) else "closed"
 
 
 def report(config, *, now=None, verify=True, archive_verify=None, disk_usage=None):
@@ -64,14 +64,19 @@ def report(config, *, now=None, verify=True, archive_verify=None, disk_usage=Non
                 source_blockers.append("provider_retrying")
             if market == "unknown":
                 source_blockers.append("market_calendar_unknown")
-            if market == "open":
+            # The final regular-session bar can arrive after the market closes.
+            # Keep its delivery window separate from current quote freshness:
+            # closed markets do not owe us a continuing two-sided quote.
+            bar_delivery_active = provider == "coinbase" or any(
+                row["open_time"] + 300 + config["poll_seconds"] + 60 <= now <= row["close_time"] + 900
+                for coverage in item["calendar_coverage"] for row in coverage["sessions"])
+            if market == "open" or bar_delivery_active:
                 symbols = ("BTC-USD",) if provider == "coinbase" else ("SPY", "QQQ", "GLD", "USO")
                 for symbol in symbols:
                     latest = item["last_by_symbol"].get(symbol, {})
                     for kind, limit in (("bar", 900), ("quote", max(90, config["poll_seconds"] + 60))):
-                        if kind == "bar" and provider == "alpaca" and not any(
-                                row["open_time"] + 300 + config["poll_seconds"] + 60 <= now <= row["close_time"] + 900
-                                for coverage in item["calendar_coverage"] for row in coverage["sessions"]):
+                        if (kind == "bar" and not bar_delivery_active
+                                or kind == "quote" and market != "open"):
                             continue
                         stamp = latest.get(kind)
                         if stamp is None or now - stamp > limit or stamp > now:

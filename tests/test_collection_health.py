@@ -119,8 +119,71 @@ def test_calendar_early_close_and_dst_use_recorded_utc_sessions():
     coverage = [{"start_date": "2026-11-27", "end_date": "2026-11-27", "sessions": [
         {"session_date": "2026-11-27", "open_time": close - 12600, "close_time": close}]}]
     assert market_state("alpaca", close - 1, coverage) == "open"
+    assert market_state("alpaca", close, coverage) == "closed"
+    assert market_state("alpaca", close + 1, coverage) == "closed"
+    assert market_state("alpaca", close + 899, coverage) == "closed"
     assert market_state("alpaca", close + 901, coverage) == "closed"
     assert market_state("alpaca", close + 86400, coverage) == "unknown"
+
+
+@pytest.mark.parametrize("after_close", [0, 1, 480, 900, 901])
+@pytest.mark.parametrize("quote_missing", [False, True])
+def test_closed_market_does_not_require_fresh_quotes_during_final_bar_delivery(
+        tmp_path, after_close, quote_missing):
+    config, clock = config_for(tmp_path, providers=["alpaca"]), Clock()
+    init_runtime(config, clock=clock)
+    close = NOW + 18000
+    now = close + after_close
+    active(config, now)
+    with connection(config["state_dir"], write=True) as db:
+        item = provider_state(db, "alpaca")
+        for latest in item["last_by_symbol"].values():
+            latest.update(bar=close, quote=None if quote_missing else close - 3600)
+        save_provider(db, "alpaca", item)
+    result = report(config, now=now)
+    assert result["providers"]["alpaca"]["market"] == "closed"
+    assert result["status"] == "HEALTHY"
+    assert result["blockers"] == []
+
+
+@pytest.mark.parametrize("after_close,bar_required", [(480, True), (900, True), (901, False)])
+def test_final_equity_bar_delivery_grace_survives_accurate_closed_market_state(
+        tmp_path, after_close, bar_required):
+    config, clock = config_for(tmp_path, providers=["alpaca"]), Clock()
+    init_runtime(config, clock=clock)
+    now = NOW + 18000 + after_close
+    active(config, now)
+    with connection(config["state_dir"], write=True) as db:
+        item = provider_state(db, "alpaca")
+        item["last_by_symbol"] = {}
+        save_provider(db, "alpaca", item)
+    result = report(config, now=now)
+    assert result["providers"]["alpaca"]["market"] == "closed"
+    expected = ["alpaca:" + symbol + "_bar_missing_or_stale" for symbol in ("SPY", "QQQ", "GLD", "USO")]
+    assert result["blockers"] == (expected if bar_required else [])
+    assert result["status"] == ("UNHEALTHY" if bar_required else "HEALTHY")
+
+
+@pytest.mark.parametrize("failures,success_age,blocker", [
+    (1, 0, "provider_retrying"),
+    (0, 181, "provider_requests_stale"),
+])
+def test_market_close_never_hides_failed_or_stale_requests(tmp_path, failures, success_age, blocker):
+    config, clock = config_for(tmp_path, providers=["alpaca"]), Clock()
+    init_runtime(config, clock=clock)
+    close = NOW + 18000
+    now = close + 480
+    active(config, now)
+    with connection(config["state_dir"], write=True) as db:
+        item = provider_state(db, "alpaca")
+        item.update(failures=failures, last_success_at=now - success_age)
+        for latest in item["last_by_symbol"].values():
+            latest.update(bar=close, quote=None)
+        save_provider(db, "alpaca", item)
+    result = report(config, now=now)
+    assert result["providers"]["alpaca"]["market"] == "closed"
+    assert result["status"] == "UNHEALTHY"
+    assert result["blockers"] == ["alpaca:" + blocker]
 
 
 def test_disk_reserve_failure_is_unhealthy(tmp_path):

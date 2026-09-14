@@ -4,11 +4,12 @@
 
 **PARTIALLY READY:** the foreground collector, daily archive partitions, gap and
 retry checkpoints, health command, verified backups, systemd units and installer
-are implemented. Bounded real Alpaca/Coinbase GET checks passed. Linux packaging,
-non-root initialization, systemd unit validation and crash/restart simulations
-passed. No VPS has been provisioned or activated, and no 24-hour uptime or actual
-machine reboot has been demonstrated. No order, account, transfer or strategy
-evaluation request is part of this deployment.
+are implemented. A Google Cloud e2-micro host has been installed, with bounded
+Alpaca/Coinbase GET checks, non-root collection, verified backups, separate local
+and offsite restores, and automatic collection after a real machine reboot.
+The initial after-close IEX quote failure is addressed below. Continuous 24-hour
+uptime and a period with the Mac shut down have not yet been demonstrated. No
+order, account, transfer or strategy evaluation request is part of this deployment.
 
 This is a separate collector process. Its installed release contains an explicit
 allowlist of standard-library Python modules. It excludes broker/order modules,
@@ -52,6 +53,14 @@ retry counters and next-attempt deadlines survive restart. Bounded exponential
 backoff reaches 3,600 seconds; parsed Retry-After is a minimum up to 86,400 seconds.
 The HTTPS clients refuse redirects and non-allowlisted paths, bound pages and
 response bytes, and time out. Provider failures do not log credentials or raw text.
+
+An Alpaca quote side with zero price, zero size and a blank exchange is treated
+as unavailable: its exact raw response is retained, no two-sided quote is
+admitted, and valid bars in that response batch remain collectable. Other invalid
+quote shapes still fail validation. Market state closes at the recorded session
+close; the final-bar delivery grace is separate from quote freshness. Closed
+markets do not require fresh quotes, while failed or stale HTTP collection still
+reports unhealthy. This does not change Data Contract V1 or qualify missing data.
 
 One process lock prevents competing collectors. The snapshot barrier prevents
 backups from splitting an archive commit from its operational checkpoint. If a
@@ -295,7 +304,7 @@ and caught-up bars are historical.
 
 ## Verified boundaries and remaining work
 
-- Final complete repository suite: **3,057 passed, 3 skipped, 0 failed**. The skips
+- Complete repository suite after the after-close fix: **3,086 passed, 3 skipped, 0 failed**. The skips
   are optional IQ vendor tests, a private DuckDB dataset and the explicitly opt-in
   disposable Linux installer test. That installer test was run separately and
   passed on Ubuntu. The minimal one-CPU/1-GiB Linux collector suite passed
@@ -321,8 +330,10 @@ fixed numeric values. A separate initial macOS Docker bind-output check correctl
 refused container/host owner mismatch; the benchmark then ran in a private
 container-native directory. Neither failed attempt is counted as a passing run.
 
-Outstanding: provision/select the actual VPS; install the local release; verify
-provider permissions and target-host DNS/TLS/clock/network; observe startup after
-an actual host reboot and a 24-hour run with the Mac off; verify an offsite restore;
-choose storage/retention that fits the intended collection duration. Original
-strategy/data qualification blockers remain; none of this permits live trading.
+Outstanding: observe a 24-hour run including a period with the Mac off; independently
+audit provider-side credential permissions; configure scheduled offsite backups
+(the initial manual offsite restore passed); choose storage/retention that fits
+the intended collection duration and verify billed cost. Keep provider gaps
+explicit. Original strategy/data qualification blockers remain; none of this
+permits live trading. Actual host status and deployment receipts are maintained
+separately from this reusable installation guide.
