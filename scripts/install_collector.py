@@ -10,13 +10,14 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import stat
 import subprocess
 import sys
 import uuid
 
 SOURCE = Path(__file__).resolve().parents[1]
-FILES = (
+LEGACY_FILES = (
     "atlas/__init__.py", "atlas/research/__init__.py", "atlas/collection/__init__.py",
     "atlas/collection/primitives.py", "atlas/collection/config.py", "atlas/collection/state.py",
     "atlas/collection/runtime.py", "atlas/collection/health.py", "atlas/collection/archive.py",
@@ -24,23 +25,27 @@ FILES = (
     "atlas/research/data_archive.py", "atlas/research/data_collector.py", "atlas/research/data_coverage.py",
     "scripts/atlas_collect.py", "scripts/atlas_health.py", "scripts/atlas_backup.py",
 )
-UNITS = ("atlas-collector.service", "atlas-collector-backup.service", "atlas-collector-backup.timer")
+OFFSITE_FILES = ("atlas/collection/offsite.py", "scripts/atlas_offsite_backup.py")
+FILES = LEGACY_FILES + OFFSITE_FILES
+UNITS = ("atlas-collector.service", "atlas-collector-backup.service", "atlas-collector-backup.timer",
+         "atlas-collector-offsite.service")
 CONFIG_DIR = Path("/etc/atlas-collector")
 STATE_DIR = Path("/var/lib/atlas-collector")
 BACKUP_DIR = Path("/var/backups/atlas-collector")
 BASE = Path("/opt/atlas-collector")
 SYSTEMD_DIR = Path("/etc/systemd/system")
 JOURNALD_DIR = Path("/etc/systemd/journald.conf.d")
+OFFSITE_DROPIN = "atlas-collector-backup.service.d/20-offsite.conf"
 
 
 def _run(args):
     subprocess.run(args, check=True)
 
 
-def release_manifest(source=None):
+def release_manifest(source=None, *, files=None):
     source = SOURCE if source is None else Path(source)
     result = {}
-    for name in FILES:
+    for name in FILES if files is None else files:
         path = source / name
         _no_links(path)
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 500000:
@@ -120,11 +125,16 @@ def _directory(path, uid, gid, mode):
 
 def _release(path, expected=None):
     _no_links(path)
-    manifest = release_manifest(path)
     manifest_path = path / "release.json"
     if manifest_path.is_symlink() or not manifest_path.is_file() or manifest_path.stat().st_size > 65536:
         raise ValueError("collector_release_manifest_invalid")
-    if json.loads(manifest_path.read_text()) != manifest or (expected is not None and manifest != expected):
+    recorded = json.loads(manifest_path.read_text())
+    if type(recorded) is not dict or set(recorded) not in (set(LEGACY_FILES), set(FILES)):
+        raise ValueError("collector_release_allowlist_invalid")
+    # A verified pre-offsite release remains a valid rollback target. Only these
+    # two complete allowlists are accepted; arbitrary subsets are not releases.
+    manifest = release_manifest(path, files=tuple(recorded))
+    if recorded != manifest or (expected is not None and manifest != expected):
         raise ValueError("collector_release_integrity_mismatch")
     return manifest
 
@@ -180,11 +190,14 @@ def main(argv=None):
     parser.add_argument("--alpaca-key-file", help="existing private JSON with api_key/api_secret; copied outside backups")
     parser.add_argument("--coinbase-only", action="store_true", help="explicit partial deployment without stock collection")
     parser.add_argument("--check", action="store_true", help="validate packaging only; change no host state")
+    parser.add_argument("--offsite-bucket", help="explicit GCS bucket; enable the separate uploader after local backup success")
     args = parser.parse_args(argv)
     if args.coinbase_only and args.alpaca_key_file:
         parser.error("choose --alpaca-key-file or --coinbase-only")
+    if args.offsite_bucket is not None and not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]", args.offsite_bucket):
+        parser.error("offsite bucket must be an explicit 3..63 character lowercase DNS-style name")
     manifest = release_manifest()
-    for name in (*UNITS, "atlas-collector-journald.conf"):
+    for name in (*UNITS, "atlas-collector-journald.conf", "atlas-collector-backup-offsite.conf"):
         path = SOURCE / "deploy" / name
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
             raise ValueError("collector_unit_source_invalid")
@@ -249,6 +262,13 @@ def main(argv=None):
         destination = SYSTEMD_DIR / name
         _no_links(destination)
         old_units[name] = destination.read_bytes() if destination.exists() else None
+    offsite_env = CONFIG_DIR / "offsite.env"
+    offsite_dropin = SYSTEMD_DIR / OFFSITE_DROPIN
+    old_offsite = {}
+    if args.offsite_bucket is not None:
+        for path in (offsite_env, offsite_dropin):
+            _no_links(path)
+            old_offsite[path] = path.read_bytes() if path.exists() else None
     journal_path = JOURNALD_DIR / "atlas-collector.conf"
     _no_links(journal_path)
     old_journal = journal_path.read_bytes() if journal_path.exists() else None
@@ -274,6 +294,7 @@ def main(argv=None):
         _run(_as_collector(release / "scripts/atlas_collect.py", "init", "--config", cfg_path))
     _run(_as_collector(release / "scripts/atlas_health.py", "--help"))
     _run(_as_collector(release / "scripts/atlas_backup.py", "--help"))
+    _run(_as_collector(release / "scripts/atlas_offsite_backup.py", "--help"))
     stopped = False
     try:
         if not fresh:
@@ -282,6 +303,10 @@ def main(argv=None):
         _switch(target, release)
         for name in UNITS:
             _replace_file(SYSTEMD_DIR / name, (SOURCE / "deploy" / name).read_bytes())
+        if args.offsite_bucket is not None:
+            _directory(offsite_dropin.parent, os.geteuid(), os.getegid(), 0o755)
+            _replace_file(offsite_env, ("ATLAS_OFFSITE_BUCKET=" + args.offsite_bucket + "\n").encode())
+            _replace_file(offsite_dropin, (SOURCE / "deploy/atlas-collector-backup-offsite.conf").read_bytes())
         _run(["systemd-analyze", "verify", *[str(SYSTEMD_DIR / name) for name in UNITS]])
         JOURNALD_DIR.mkdir(mode=0o755, exist_ok=True)
         _replace_file(journal_path, (SOURCE / "deploy/atlas-collector-journald.conf").read_bytes())
@@ -294,6 +319,11 @@ def main(argv=None):
         # A first-install failure retains its state/config for explicit recovery.
         for name, contents in old_units.items():
             path = SYSTEMD_DIR / name
+            if contents is not None:
+                _replace_file(path, contents)
+            elif path.exists():
+                path.unlink()
+        for path, contents in old_offsite.items():
             if contents is not None:
                 _replace_file(path, contents)
             elif path.exists():

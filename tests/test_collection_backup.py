@@ -155,7 +155,9 @@ def test_secret_content_inside_approved_artifact_refuses(state, tmp_path, conten
     write(state / "registrations" / "study.json", content)
     with pytest.raises(backup.BackupError, match="secret_content"):
         create(state, tmp_path)
-    failed = list((tmp_path / "backups").iterdir())
+    lock = tmp_path / "backups" / ".backup.lock"
+    assert lock.is_file() and lock.stat().st_mode & 0o777 == 0o600
+    failed = [path for path in (tmp_path / "backups").iterdir() if path != lock]
     assert len(failed) == 1 and not (failed[0] / "manifest.json").exists()
 
 
@@ -170,7 +172,7 @@ def test_corrupt_database_refuses_and_retains_failed_snapshot(state, tmp_path):
     (state / "state.sqlite3").write_bytes(b"not sqlite")
     with pytest.raises(backup.BackupError, match="sqlite_snapshot_failed"):
         create(state, tmp_path)
-    failed = list((tmp_path / "backups").iterdir())[0]
+    failed, = (tmp_path / "backups").glob("atlas-backup-*")
     assert not (failed / "manifest.json").exists()
 
 

@@ -1,0 +1,43 @@
+[Unit]
+Description=Verified ATLAS snapshot upload and readback from private Cloud Storage
+Wants=network-online.target
+After=network-online.target atlas-collector-backup.service
+ConditionPathExists=/etc/atlas-collector/offsite.env
+
+[Service]
+Type=oneshot
+User=atlas-collector
+Group=atlas-collector
+EnvironmentFile=/etc/atlas-collector/offsite.env
+Environment=LIVE_TRADING=false
+Environment=ATLAS_LIVE_TRADING_ENABLED=false
+Environment=ATLAS_LIVE_AUTO_ENABLED=false
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -I /opt/atlas-collector/current/scripts/atlas_offsite_backup.py --backup-dir /var/backups/atlas-collector --bucket ${ATLAS_OFFSITE_BUCKET} --work-dir /var/lib/atlas-collector-offsite --receipt /var/lib/atlas-collector-offsite/latest.json --min-free-bytes 1073741824
+StateDirectory=atlas-collector-offsite
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/backups/atlas-collector /var/lib/atlas-collector-offsite
+InaccessiblePaths=/var/lib/atlas-collector -/etc/atlas-collector/alpaca-data.json
+MemoryMax=350M
+CPUQuota=50%
+TasksMax=16
+LimitNOFILE=128
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=atlas-collector-offsite

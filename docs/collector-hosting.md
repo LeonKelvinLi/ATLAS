@@ -165,6 +165,13 @@ preserved for inspection instead of silently deleted. Secret-named files and
 recognized credential content are excluded/refused; arbitrary confidential data
 must never be placed in approved artifact directories.
 
+The optional [private GCS backup extension](collector-offsite.md) adds a separate
+service after local backup success. It uses the VM's short-lived identity, a
+bucket-scoped create/get role, and exact-generation downloaded verification.
+Its installer flag, restore drill, retention override, capacity limits and
+deployment evidence requirements are documented there. Enabling the extension
+alone does not prove that a scheduled backup or restore has succeeded.
+
 Under `research_artifacts/` only, frozen `.pkl` files are bounded opaque bytes:
 they are copied and hashed, never deserialized. `.db` research journals use the
 SQLite online backup API, including committed WAL changes. All staged files must

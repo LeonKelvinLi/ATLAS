@@ -341,7 +341,37 @@ def _opaque_artifact(source, target=None):
                 dst.close()
 
 
+@contextmanager
+def backup_root_lock(backup_dir):
+    """Serialize snapshot creation/pruning with offsite source packaging."""
+    destination = _path(backup_dir)
+    if not destination.exists():
+        destination.mkdir(mode=0o700)
+        _sync(destination.parent)
+    _trusted(destination, directory=True)
+    fd = os.open(destination / ".backup.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        _trusted(destination / ".backup.lock")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise BackupError("backup_root_busy") from None
+        yield destination
+    finally:
+        os.close(fd)
+
+
 def create_backup(state_dir, backup_dir, *, retention=7, wait_seconds=0, now=None):
+    """Create a verified snapshot under the shared offsite/pruning lock."""
+    state, destination = _path(state_dir), _path(backup_dir)
+    if state == destination or state in destination.parents or destination in state.parents:
+        raise BackupError("backup_source_destination_overlap")
+    _trusted(state, directory=True)
+    with backup_root_lock(destination):
+        return _create_backup(state, destination, retention=retention, wait_seconds=wait_seconds, now=now)
+
+
+def _create_backup(state_dir, backup_dir, *, retention=7, wait_seconds=0, now=None):
     """Create and verify an immutable snapshot, then prune verified old snapshots.
 
     ``retention`` counts completed snapshots, not elapsed days. A daily host timer

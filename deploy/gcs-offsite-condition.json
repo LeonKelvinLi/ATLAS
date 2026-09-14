@@ -1,0 +1,5 @@
+{
+  "title": "AtlasBackupPrefix",
+  "description": "Only immutable ATLAS backup objects in this dedicated bucket.",
+  "expression": "resource.name.startsWith('projects/_/buckets/atlas-collector-backups-836932812958/objects/backups/')"
+}

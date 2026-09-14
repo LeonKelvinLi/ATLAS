@@ -1,0 +1,9 @@
+{
+  "title": "ATLAS backup create and readback",
+  "description": "Create uniquely named ATLAS backup objects and verify their exact readback; no listing, overwrite, deletion, or bucket administration.",
+  "stage": "GA",
+  "includedPermissions": [
+    "storage.objects.create",
+    "storage.objects.get"
+  ]
+}

@@ -46,7 +46,7 @@ def test_release_allowlist_excludes_orders_models_secrets_and_general_entrypoint
         installer._release(package)
 
 
-@pytest.mark.parametrize("script", ["atlas_collect.py", "atlas_health.py", "atlas_backup.py"])
+@pytest.mark.parametrize("script", ["atlas_collect.py", "atlas_health.py", "atlas_backup.py", "atlas_offsite_backup.py"])
 def test_exact_release_entrypoints_help_without_dependencies_or_network(tmp_path, script):
     package = tmp_path / "release"
     installer.stage_release(package)
@@ -73,6 +73,22 @@ def test_units_match_real_cli_and_enforce_nonroot_data_only_resource_boundary():
     assert "RestrictAddressFamilies=AF_UNIX" in backup
     timer = (ROOT / "deploy/atlas-collector-backup.timer").read_text()
     assert "Persistent=true" in timer and "OnCalendar=*-*-* 04:15:00 UTC" in timer
+
+
+def test_verified_pre_offsite_release_is_accepted_but_arbitrary_partial_release_is_not(tmp_path):
+    package = tmp_path / "legacy-release"
+    installer.stage_release(package)
+    manifest_path = package / "release.json"
+    manifest = json.loads(manifest_path.read_text())
+    for name in installer.OFFSITE_FILES:
+        (package / name).unlink()
+        del manifest[name]
+    manifest_path.write_text(json.dumps(manifest))
+    assert installer._release(package) == manifest
+    del manifest["atlas/collection/backup.py"]
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="allowlist_invalid"):
+        installer._release(package)
 
 
 @pytest.fixture
@@ -119,6 +135,42 @@ def test_fresh_install_initializes_only_as_service_user_and_excludes_secrets_fro
     assert not any("backup" in name or "credential" in name for name in os.listdir(host.paths["STATE_DIR"]))
 
 
+def test_offsite_opt_in_installs_success_hook_without_weakening_local_backup(host):
+    bucket = "atlas-collector-backups-836932812958"
+    installer.main(["--coinbase-only", "--offsite-bucket", bucket])
+    assert (host.paths["CONFIG_DIR"] / "offsite.env").read_text() == "ATLAS_OFFSITE_BUCKET=" + bucket + "\n"
+    hook = host.paths["SYSTEMD_DIR"] / installer.OFFSITE_DROPIN
+    assert "OnSuccess=atlas-collector-offsite.service" in hook.read_text()
+    backup = (host.paths["SYSTEMD_DIR"] / "atlas-collector-backup.service").read_text()
+    assert "RestrictAddressFamilies=AF_UNIX" in backup and "--retention 7" in backup
+    offsite = (host.paths["SYSTEMD_DIR"] / "atlas-collector-offsite.service").read_text()
+    assert "User=atlas-collector" in offsite and "--backup-dir /var/backups/atlas-collector" in offsite
+    assert "InaccessiblePaths=/var/lib/atlas-collector -/etc/atlas-collector/alpaca-data.json" in offsite
+    assert not any("atlas_offsite_backup.py" in " ".join(row) and "--help" not in row for row in host.calls)
+
+
+def test_failed_activation_restores_previous_offsite_bucket_and_hook(host, monkeypatch):
+    installer.main(["--coinbase-only", "--offsite-bucket", "old-backup-bucket"])
+    env = host.paths["CONFIG_DIR"] / "offsite.env"
+    hook = host.paths["SYSTEMD_DIR"] / installer.OFFSITE_DROPIN
+    original = (env.read_bytes(), hook.read_bytes())
+    def fail_activate(args):
+        host.calls.append(args)
+        if args == ["systemctl", "is-active", "atlas-collector.service"]:
+            raise subprocess.CalledProcessError(3, args)
+    monkeypatch.setattr(installer, "_run", fail_activate)
+    with pytest.raises(subprocess.CalledProcessError):
+        installer.main(["--offsite-bucket", "new-backup-bucket"])
+    assert (env.read_bytes(), hook.read_bytes()) == original
+
+
+@pytest.mark.parametrize("bucket", ["gs://bucket", "bucket name", "bucket\nOTHER=value", "UPPERCASE"])
+def test_offsite_bucket_cannot_inject_environment_or_extra_arguments(host, bucket):
+    with pytest.raises(SystemExit):
+        installer.main(["--coinbase-only", "--offsite-bucket", bucket])
+    assert host.calls == []
+
+
 def test_update_backs_up_old_release_before_stop_and_preserves_configuration_and_state(host, monkeypatch):
     installer.main(["--coinbase-only"])
     old_release = (host.paths["BASE"] / "current").resolve()
@@ -161,7 +213,8 @@ def test_failed_new_release_activation_rolls_back_link_units_without_rolling_bac
     sentinel.write_bytes(b"do not replace state")
     source = tmp_path / "new-source"
     source.mkdir()
-    for name in (*installer.FILES, *("deploy/" + unit for unit in installer.UNITS), "deploy/atlas-collector-journald.conf"):
+    for name in (*installer.FILES, *("deploy/" + unit for unit in installer.UNITS),
+                 "deploy/atlas-collector-journald.conf", "deploy/atlas-collector-backup-offsite.conf"):
         dest = source / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, dest)
