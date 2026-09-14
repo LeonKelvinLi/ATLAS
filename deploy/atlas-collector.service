@@ -1,0 +1,46 @@
+[Unit]
+Description=ATLAS data-only market collector
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=atlas-collector
+Group=atlas-collector
+WorkingDirectory=/opt/atlas-collector/current
+ExecStart=/usr/bin/python3 -I /opt/atlas-collector/current/scripts/atlas_collect.py run --config /etc/atlas-collector/config.json
+Restart=always
+RestartSec=15
+TimeoutStopSec=90
+KillSignal=SIGTERM
+UMask=0077
+Environment=LIVE_TRADING=false
+Environment=ATLAS_LIVE_TRADING_ENABLED=false
+Environment=ATLAS_LIVE_AUTO_ENABLED=false
+Environment=PYTHONDONTWRITEBYTECODE=1
+StateDirectory=atlas-collector
+StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/atlas-collector
+MemoryMax=600M
+CPUQuota=90%
+TasksMax=32
+LimitNOFILE=1024
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=atlas-collector
+
+[Install]
+WantedBy=multi-user.target

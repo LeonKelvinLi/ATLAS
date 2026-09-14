@@ -14,6 +14,11 @@ revision-aware receipt clocks, sealed study buckets and a read-only 90/90/90
 coverage command. Historical imports remain historical; coverage does not certify
 strategy performance or enable trading.
 
+The [data-only VPS collector](docs/collector-hosting.md) adds a foreground loop,
+daily partitions, outage backfills, health, verified backups and non-root systemd
+deployment. Its installed runtime has no order modules or scientific dependencies.
+Bounded provider/Linux tests are distinct from an activated VPS or proven uptime.
+
 ## Try it without an account
 
 Requires Git, [uv](https://docs.astral.sh/uv/), and Python 3.12+. Dependency installation needs internet access; these examples use generated data offline.

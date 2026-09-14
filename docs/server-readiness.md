@@ -139,3 +139,14 @@ The historical-only migration check contains 14,843 bars and still fails the
 90/90/90 coverage requirement. No prospective collection job was started.
 Independent publication/calendar/cost provenance and host durability/recovery
 verification remain separate requirements; this intake cannot self-certify alpha.
+
+## September 14 collection hosting
+
+The separate [data-only collector deployment](collector-hosting.md) now supplies
+the foreground retry loop, persisted outage/gap checkpoints, daily UTC archive
+partitions, private verified backups, health commands and hardened systemd units.
+Its minimal installed release excludes broker/order and strategy modules. Real
+bounded Alpaca/Coinbase market-data GET checks succeeded. Linux packaging and
+crash simulations passed; a target VPS, real reboot, offsite restore and 24-hour
+uptime remain unverified. The broader execution service described above remains
+unconfigured, and no trading process was activated.

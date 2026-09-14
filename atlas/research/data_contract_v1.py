@@ -12,8 +12,7 @@ import json
 import re
 from zoneinfo import ZoneInfo
 
-from atlas.research.market import timestamp
-from atlas.research.multiasset_validation import DEFAULT_THRESHOLDS
+from atlas.collection.primitives import DEFAULT_THRESHOLDS, timestamp
 
 
 VERSION = 'ATLAS_DATA_CONTRACT_V1'

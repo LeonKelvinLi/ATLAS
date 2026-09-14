@@ -36,15 +36,12 @@ import ssl
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from atlas.alpaca_paper_preflight import HTTPResponse, _credentials
-from atlas.research.coinbase_history import request_url as candle_url
-from atlas.research.data_adapters import (
-    HistoricalBarsRequest, NY, _bars_url, _calendar, _calendar_url, _page,
-    _target as alpaca_target, parse_utc,
+from atlas.collection.primitives import (
+    HTTPResponse, CollectionWindow, NY, _credentials, _bars_url, _calendar,
+    _calendar_url, _page, alpaca_target, parse_utc, candle_url,
+    _external_path, _json, timestamp, retry_after_seconds,
 )
 from atlas.research.data_contract_v1 import VERSION, validate_contract, validate_record
-from atlas.research.imports import _external_path, _json
-from atlas.research.market import timestamp
 
 
 MAX_RESPONSE_BYTES = 2_000_000
@@ -67,10 +64,13 @@ class DataCollectorError(ValueError):
     in ``captures``; they must be stored privately, never logged as diagnostics.
     """
 
-    def __init__(self, code, *, captures=None):
+    def __init__(self, code, *, captures=None, status=None, retry_after_seconds=None):
         super().__init__(code)
         self.code = code
         self.captures = [dict(capture) for capture in (captures or [])]
+        self.status = status if type(status) is int and 100 <= status <= 599 else None
+        self.retry_after_seconds = (retry_after_seconds if type(retry_after_seconds) is int
+                                    and 0 <= retry_after_seconds <= 86400 else None)
 
 
 def _clock_sample(clock):
@@ -139,7 +139,11 @@ def _bounded_get(url, headers, *, target_fn, timeout_seconds, max_response_bytes
         connection.request("GET", target, headers=headers)
         response = connection.getresponse()
         if response.status != 200:  # No redirect following, retries or body logging.
-            raise DataCollectorError("collector_http_refused")
+            retry = None
+            if response.status in (429, 503):
+                retry = retry_after_seconds(response.getheader("Retry-After"), now=time.time())
+            raise DataCollectorError("collector_http_refused", status=response.status,
+                                     retry_after_seconds=retry)
         length = response.getheader("Content-Length")
         if length is not None and (not length.isdigit() or int(length) > max_response_bytes):
             raise DataCollectorError("collector_response_size_invalid")
@@ -320,10 +324,27 @@ def collect_once(contract, *, provider, start, end, key_file=None, transport=Non
             (_alpaca_target if provider == "alpaca" else _exchange_target)(url)
             try:
                 response = getter(url, dict(headers), timeout_seconds=TIMEOUT_SECONDS, max_response_bytes=MAX_RESPONSE_BYTES)
+            except DataCollectorError as exc:
+                # Only our built-in transport may export its fixed error codes.
+                # Injected exceptions remain untrusted even if they use this class.
+                if transport is None:
+                    raise
+                raise DataCollectorError("collector_request_or_response_invalid",
+                    status=exc.status, retry_after_seconds=exc.retry_after_seconds) from None
             except Exception:
                 # A test transport may raise our own class with arbitrary text.
                 # Only locally produced diagnostics may escape this boundary.
                 raise DataCollectorError("collector_request_or_response_invalid") from None
+            if type(response.status) is int and 100 <= response.status <= 599 and response.status != 200:
+                raw_headers = getattr(response, "headers", {})
+                retry = None
+                if response.status in (429, 503) and type(raw_headers) is dict:
+                    values = [value for key, value in raw_headers.items()
+                              if type(key) is str and key.lower() == "retry-after"]
+                    if len(values) == 1:
+                        retry = retry_after_seconds(values[0], now=float(_clock_sample(clock_fn)))
+                raise DataCollectorError("collector_http_response_invalid", status=response.status,
+                                         retry_after_seconds=retry)
             if (type(response.status) is not int or response.status != 200
                     or type(response.body) is not bytes or not 0 < len(response.body) <= MAX_RESPONSE_BYTES):
                 raise DataCollectorError("collector_http_response_invalid")
@@ -342,8 +363,7 @@ def collect_once(contract, *, provider, start, end, key_file=None, transport=Non
 
     try:
         if provider == "alpaca":
-            request = HistoricalBarsRequest("alpaca", "equity", EQUITIES, start, end,
-                                            max_pages=MAX_PAGES, page_limit=PAGE_LIMIT)
+            request = CollectionWindow(start, end, EQUITIES, page_limit=PAGE_LIMIT)
             raw, receipt = capture("calendar", _calendar_url(request))
             # A weekend/holiday can truthfully return no sessions.
             calendar = _calendar(raw, request) if raw != [] else {"sessions": []}
@@ -411,7 +431,8 @@ def collect_once(contract, *, provider, start, end, key_file=None, transport=Non
         # Validation deliberately retains unknown/stale evidence as blockers.
         records = [validate_record(row, contract, _ceil(previous))["record"] for row in records]
     except DataCollectorError as exc:
-        raise DataCollectorError(exc.code, captures=captures) from None
+        raise DataCollectorError(exc.code, captures=captures, status=exc.status,
+                                 retry_after_seconds=exc.retry_after_seconds) from None
     except Exception:
         raise DataCollectorError("collector_payload_contract_invalid", captures=captures) from None
     records.sort(key=lambda row: (row["event_time"], row["symbol"], row["record_type"]))

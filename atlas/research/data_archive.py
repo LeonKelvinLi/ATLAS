@@ -14,7 +14,7 @@ import stat
 import time
 
 from atlas.research.data_contract_v1 import validate_contract, validate_record
-from atlas.research.imports import _encoded, _external_path, _json, _sha, _sync_dir
+from atlas.collection.primitives import _encoded, _external_path, _json, _sha, _sync_dir
 
 MAX_BATCH_RECORDS = 20000
 MAX_RECORDS = 1_000_000
@@ -127,6 +127,19 @@ def init_archive(root, contract, *, clock=None):
         raise DataArchiveError("archive_requires_new_external_directory")
     manifest = {"archive_version": 1, "contract": contract,
                 "clock_basis": "system_utc" if clock is None else "injected_test_clock"}
+    _create_archive(root, manifest)
+    return verify_archive(root, clock=clock)
+
+
+def _create_archive(root, manifest):
+    """Storage-only constructor; collection partitions inherit a verified registration.
+
+    This private seam does not create a study or certify its registration time.
+    Public standalone registration remains current-clock-only in init_archive.
+    """
+    root = _external_path(root)
+    if root.exists() or not root.parent.is_dir():
+        raise DataArchiveError("archive_requires_new_external_directory")
     body = _encoded(manifest)
     # Failed initialization is retained, never silently repaired or recreated.
     try:
@@ -145,7 +158,6 @@ def init_archive(root, contract, *, clock=None):
         _sync_dir(root.parent)
     except (OSError, sqlite3.Error):
         raise DataArchiveError("archive_initialization_failed_retained_for_inspection") from None
-    return verify_archive(root, clock=clock)
 
 
 def _decode(body, *, max_bytes=MAX_BATCH_BYTES):

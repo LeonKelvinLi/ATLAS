@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily verified ATLAS backup
+
+[Timer]
+OnCalendar=*-*-* 04:15:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+Unit=atlas-collector-backup.service
+
+[Install]
+WantedBy=timers.target

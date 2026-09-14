@@ -12,17 +12,13 @@ import statistics
 import numpy as np
 
 from atlas.domain import decimal, financial_context
+from atlas.collection.primitives import DEFAULT_THRESHOLDS
 from atlas.research import diagnostics
 from atlas.research.market import timestamp
 from atlas.research.splits import timestamp_folds, validate_fold
 
 
 DAY = 86400
-DEFAULT_THRESHOLDS = {
-    "min_completed_round_trips": 30, "min_daily_observations": 60,
-    "max_drawdown": .10, "min_sharpe": 1.2, "min_profit_factor": 1.25,
-    "min_net_return": 0.0,
-}
 PAPER_EVIDENCE = {"HISTORICAL_OUT_OF_SAMPLE", "PAPER", "SHADOW"}
 
 

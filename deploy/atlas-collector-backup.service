@@ -1,0 +1,25 @@
+[Unit]
+Description=Verified local ATLAS collector backup
+
+[Service]
+Type=oneshot
+User=atlas-collector
+Group=atlas-collector
+ExecStart=/usr/bin/python3 -I /opt/atlas-collector/current/scripts/atlas_backup.py create --state-dir /var/lib/atlas-collector --backup-dir /var/backups/atlas-collector --retention 7 --wait-seconds 90
+UMask=0077
+Environment=LIVE_TRADING=false
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/atlas-collector /var/backups/atlas-collector
+MemoryMax=350M
+CPUQuota=50%
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal
