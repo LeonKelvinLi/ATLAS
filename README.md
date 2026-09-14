@@ -9,6 +9,11 @@ hypotheses for SPY/QQQ mean reversion, BTC breakouts and GLD/USO proxy trends,
 with shared risk, chronological validation, cost stress and a cash-only paper
 tournament. Historical intake and synthetic testing do not enable real orders.
 
+[Data Contract V1](docs/data-contract-v1.md) adds append-only stock/BTC intake,
+revision-aware receipt clocks, sealed study buckets and a read-only 90/90/90
+coverage command. Historical imports remain historical; coverage does not certify
+strategy performance or enable trading.
+
 ## Try it without an account
 
 Requires Git, [uv](https://docs.astral.sh/uv/), and Python 3.12+. Dependency installation needs internet access; these examples use generated data offline.
