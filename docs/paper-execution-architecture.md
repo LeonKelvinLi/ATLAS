@@ -16,9 +16,9 @@ is changed.
 | Operations | Research/collector hosting and separate generic service shell | Add bounded paper CLI, kill switch and redacted event trail; no new workers, deployments or collector integration. |
 | Qualification | Frozen research rules, immutable archives/holdout and multiasset scorecards | Add evidence-gate reporting without evaluating or tuning frozen strategies or consuming holdout. |
 
-## Planned boundary
+## Implemented boundary
 
-Add atlas/paper as an explicit equity PAPER engine, separate from the deployed
+The new atlas/paper package is an explicit equity PAPER engine, separate from the deployed
 collector, existing research/simulation code and exhausted crypto connectivity
 pilot. Reuse atlas.domain decimal/financial_context and atlas.ledger canonical
 JSON/digest. Strategy callers provide reviewed, hash-bound decisions only;
@@ -34,6 +34,9 @@ resubmission. Cancellation acknowledgement is not a final cancellation. Use
 cancel/reconcile/new-order replacement with a new deterministic child identity;
 never assume a native replacement eliminates fill races.
 
-Authenticated broker qualification remains blocked by the unresolved historical
-403. This development uses synthetic broker responses and isolated local state;
-no new account session or paper order is assumed safe from the earlier setup.
+Authenticated broker qualification remains unestablished. The historical BTC
+pilot's 403 has not been resolved here; it is not evidence that a different equity
+request will fail. This development uses synthetic broker responses and isolated
+local state. The owned API's paper_execution_enabled flag defaults false; an
+explicit true still requires fixed PAPER endpoints, a dedicated account, durable
+ownership, and engine-issued authorization. No broker session was activated.
