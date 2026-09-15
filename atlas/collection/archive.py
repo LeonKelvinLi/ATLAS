@@ -260,7 +260,11 @@ def acquire_collection_once(root, *, provider, start, end, key_file=None, transp
         results = []
         with _catalog(root, write=True) as db:
             for (day, origin), records in sorted(grouped.items()):
-                shard = _shard(root, day, registration, current, db)
+                # Each append samples its own durable ingestion time. A later
+                # group can revisit this same shard after that time advances;
+                # validate against the current clock, not the earlier routing
+                # sample. The scan still rejects genuinely future batch times.
+                shard = _shard(root, day, registration, store.receipt_time(clock), db)
                 results.append(store._append(shard, records=records, captures=bundle["captures"],
                     calendar_coverage=bundle["calendar_coverage"], origin=origin,
                     provenance=bundle["provenance"] + (":outage_backfill" if acquisition_mode == "outage_backfill" else ""), clock=clock))

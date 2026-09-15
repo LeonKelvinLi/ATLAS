@@ -56,6 +56,29 @@ def test_exact_release_entrypoints_help_without_dependencies_or_network(tmp_path
     assert "usage:" in result.stdout
 
 
+def test_packaged_collector_retains_safe_failure_without_site_packages(tmp_path):
+    package = tmp_path / "release"
+    installer.stage_release(package)
+    config = tmp_path / "private-config.json"
+    config.write_text("PRIVATE_SENTINEL_TOKEN_not_json")
+    config.chmod(0o600)
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(package / "scripts/atlas_collect.py"),
+         "once", "--config", str(config)],
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 1
+    assert result.stdout == ""
+    receipt = json.loads(result.stderr)
+    assert receipt["stage"] == "load_config"
+    assert receipt["cause"] == "collector_json_invalid"
+    assert receipt["event"] == "collector_fatal"
+    assert receipt["execution_enabled"] is False
+    assert "PRIVATE_SENTINEL" not in result.stderr
+    assert str(tmp_path) not in result.stderr
+    assert not (package / "state").exists()
+
+
 def test_units_match_real_cli_and_enforce_nonroot_data_only_resource_boundary():
     unit = (ROOT / "deploy/atlas-collector.service").read_text()
     for setting in (
