@@ -16,6 +16,7 @@ from atlas.paper.broker import AlpacaPaperAPI, PaperBrokerError
 from atlas.paper.engine import PaperEngine
 from atlas.paper.journal import PaperJournal, _directory
 from atlas.paper.models import PaperError, amount, decision, sha256
+from atlas.paper.preflight import collect_preflight
 from atlas.paper.risk import PaperRiskPolicy
 from atlas.paper.simulation import SyntheticAlpaca
 
@@ -36,6 +37,15 @@ def _path(value):
     path = Path(value)
     if not path.is_absolute() or ".." in path.parts or any(part.is_symlink() for part in (path, *path.parents)):
         raise PaperCLIError("paper_cli_path_invalid")
+    return path
+
+
+def _paper_key_path(value):
+    path = _path(value)
+    # The earlier halted pilot and collector may share these credentials. A
+    # separate equity experiment must not accidentally reuse that selection.
+    if path.is_relative_to(Path.home() / ".config/atlas/alpaca-paper"):
+        raise PaperCLIError("paper_cli_legacy_pilot_credentials_protected")
     return path
 
 
@@ -93,7 +103,7 @@ def load_config(path):
                    "allocated_principal": str(principal), "policy_sha256": policy.fingerprint()}
     except (TypeError, ValueError, ArithmeticError):
         raise PaperCLIError("paper_cli_policy_or_binding_invalid") from None
-    state, credentials = _path(config["state_dir"]), _path(config["credentials_file"])
+    state, credentials = _path(config["state_dir"]), _paper_key_path(config["credentials_file"])
     if credentials == _path(path) or credentials == state or credentials.is_relative_to(state) or _path(path).is_relative_to(state):
         raise PaperCLIError("paper_cli_state_and_inputs_must_be_separate")
     try:
@@ -202,6 +212,10 @@ def main(argv=None):
     parser = _Parser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
     commands.add_parser("demo", help="temporary synthetic fill/cancel/restart; no account access")
+    preflight = commands.add_parser("preflight", help="bounded PAPER account/data reads; creates no journal")
+    preflight.add_argument("--key-file", required=True)
+    preflight.add_argument("--allocated-principal", default="100")
+    preflight.add_argument("--symbol", action="append", dest="symbols")
     for name in ("config-check", "initialize", "status", "reconcile", "submit", "cancel", "replace", "halt"):
         sub = commands.add_parser(name)
         sub.add_argument("--config", required=True)
@@ -213,6 +227,16 @@ def main(argv=None):
         args = parser.parse_args(argv)
         if args.command == "demo":
             result = demo()
+        elif args.command == "preflight":
+            key_path = _paper_key_path(args.key_file)
+            principal = amount(args.allocated_principal, positive=True)
+            if principal > 100:
+                raise PaperCLIError("paper_cli_preflight_allocation_invalid")
+            api = AlpacaPaperAPI(credentials_path=str(key_path))
+            report = collect_preflight(api, allocated_principal=str(principal),
+                symbols=tuple(args.symbols) if args.symbols is not None else ("SPY", "QQQ", "GLD", "USO"))
+            result = {"ok": not report["read_errors"], "command": "preflight", "result": report,
+                      "network_command": True, "journal_created": False, "live_enabled": False}
         else:
             config = load_config(args.config)
             if args.command == "config-check":

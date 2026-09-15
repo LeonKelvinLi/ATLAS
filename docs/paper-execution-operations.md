@@ -57,6 +57,10 @@ authenticated commands use the existing private Alpaca key-file loader, which
 validates the credential file. Offline commands still work when that key file is
 missing. Keep config and credentials outside the execution state directory.
 Neither credential values nor their path are printed by `config-check`.
+The new CLI refuses credentials inside `~/.config/atlas/alpaca-paper`, which
+belongs to the halted older pilot and may also be used by the collector. Choose
+a genuinely separate paper account and key; copying the old key to a new path
+does not create account isolation.
 
 The first initialization requires empty broker order/activity/position history,
 an active USD account with multiplier one, and starting cash/equity equal to the
@@ -66,6 +70,32 @@ account, strategy and normalized risk policy are persistently bound; changing
 those fields cannot reopen the journal as a new experiment.
 
 ## Commands
+
+Before creating a journal or selecting a strategy, inspect an independently
+selected paper key with a bounded, read-only preflight:
+
+```sh
+python scripts/atlas_paper.py preflight --key-file /absolute/private/new-paper-keys.json --symbol SPY
+```
+
+This command needs no execution config and creates no journal, account lock,
+reservation or order. It reads account/position/order/activity state, the market
+clock and asset eligibility. Quotes are inspected only while the regular session
+is open. Omit `--symbol` to inspect SPY, QQQ, GLD and USO; repeat it for a subset.
+The default `--allocated-principal` is `100`, and values above `100` are refused.
+
+The report separates `account_ready`, asset checks and `market_state`.
+`WAIT_MARKET_OPEN` means the session is closed, not that an otherwise valid
+account failed. `execution_ready` remains false: even a successful read cannot
+prove that an order will be accepted or authorize an execution. Exit zero means
+the inspection completed without read errors, not that the account or strategy
+qualified. Provider/read failures return a nonzero status with fixed safe codes.
+
+Use the current report's account fingerprint when preparing the new config.
+The new engine uses the `alpaca-paper` identity namespace; the older preflight
+used `alpaca_paper`. Their digests are not interchangeable, and an old digest
+cannot be converted without a freshly authenticated account UUID. The report
+does not expose that raw UUID. Synthetic transport remains `TEST` evidence.
 
 Run from this checkout with the project's installed Python environment. The
 script adds its own project directory to the import path, so it also works from

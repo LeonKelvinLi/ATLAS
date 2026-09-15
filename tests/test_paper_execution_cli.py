@@ -75,6 +75,54 @@ def test_config_check_defaults_to_disabled_without_state_or_credential_access(tm
     assert config["credentials_file"] not in json.dumps(output)
 
 
+def test_old_pilot_key_selection_is_refused_by_new_config_and_preflight(tmp_path, config, capsys):
+    old_key = str(Path.home() / ".config/atlas/alpaca-paper/paper-keys.json")
+    config["credentials_file"] = old_key
+    path = private_json(tmp_path / "config.json", config)
+    for args in (("config-check", "--config", path), ("preflight", "--key-file", old_key)):
+        code, result = invoke(capsys, *args)
+        assert code == 2 and result["error"] == "paper_cli_legacy_pilot_credentials_protected"
+        assert old_key not in json.dumps(result)
+    assert not Path(config["state_dir"]).exists()
+
+
+def test_read_only_preflight_needs_no_config_or_journal_and_cannot_enable_writes(tmp_path, capsys, monkeypatch):
+    calls = []
+
+    def inspect(api, *, allocated_principal, symbols):
+        assert api.provenance == "PAPER_API" and api.execution_enabled is False
+        calls.append((allocated_principal, symbols))
+        return {"read_errors": [], "account_ready": True, "market_state": "WAIT_MARKET_OPEN",
+                "execution_ready": False, "actual_orders_submitted": 0, "account_mutations": 0}
+
+    monkeypatch.setattr("atlas.paper.cli.collect_preflight", inspect)
+    code, output = invoke(capsys, "preflight", "--key-file", str(tmp_path / "selected-paper-key.json"),
+                          "--symbol", "SPY")
+    assert code == 0 and output["ok"]
+    assert output["result"]["market_state"] == "WAIT_MARKET_OPEN"
+    assert output["result"]["execution_ready"] is False
+    assert output["journal_created"] is False
+    assert calls == [("100", ("SPY",))]
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("principal", ["0", "101", "NaN", "-1"])
+def test_preflight_bad_allocation_is_refused_before_credentials(tmp_path, capsys, principal):
+    code, result = invoke(capsys, "preflight", "--key-file", str(tmp_path / "missing.json"),
+                          "--allocated-principal", principal)
+    assert code == 2 and result["ok"] is False
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_preflight_read_failure_is_nonzero_without_journal_creation(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("atlas.paper.cli.collect_preflight", lambda *args, **kwargs:
+                        {"read_errors": ["paper_request_rejected"], "account_ready": False})
+    code, output = invoke(capsys, "preflight", "--key-file", str(tmp_path / "missing.json"))
+    assert code == 3 and output["ok"] is False
+    assert output["journal_created"] is False
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize("change", [
     {"mode": "LIVE"}, {"mode": "SIMULATION"}, {"schema_version": True},
     {"schema_version": 2}, {"paper_execution_enabled": "true"},

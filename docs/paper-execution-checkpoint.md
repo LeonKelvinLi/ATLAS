@@ -4,6 +4,11 @@ Overall readiness: **PARTIAL**. The isolated engineering implementation and full
 regression suite pass. No authenticated Alpaca order lifecycle or strategy
 performance result was established by this work.
 
+The subsequent read-only account-preflight continuation passed **3,643 tests,
+with 3 intentional skips**, and preserves the same execution/validation boundary.
+Its remaining Chrome/account-selection blocker and exact next step are in
+[paper-account-preflight-checkpoint.md](paper-account-preflight-checkpoint.md).
+
 Worktree: `/Users/leon/Desktop/dev/ATLAS-paper-execution`.
 Branch: `codex/atlas-paper-execution`. Base: `e36ca70`.
 
