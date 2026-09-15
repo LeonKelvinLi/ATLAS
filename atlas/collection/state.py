@@ -24,11 +24,16 @@ SCHEMA = (
 )
 
 
-def utc_now(clock=None):
+def clock_sample(clock=None):
+    """Validate wall time without rounding it across a request boundary."""
     value = (time.time if clock is None else clock)()
     if type(value) not in (int, float) or not math.isfinite(value) or not 0 < value < 32503680000:
         raise CollectionError("collector_clock_invalid")
-    return math.ceil(value)
+    return value
+
+
+def utc_now(clock=None):
+    return math.ceil(clock_sample(clock))
 
 
 def sync_dir(path):

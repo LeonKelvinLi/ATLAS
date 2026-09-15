@@ -332,6 +332,76 @@ def test_reconnect_recent_bars_cannot_be_promoted_to_prospective(tmp_path, monke
     assert len(next_quote) == 1 and next_quote[0]["acquisition_kind"] == "prospective_observation"
 
 
+@pytest.mark.parametrize("provider", ["alpaca", "coinbase"])
+@pytest.mark.parametrize("offset,expected_end,receipt", [
+    (-0.5, NOW - 300, NOW),
+    (0, NOW, NOW),
+    (0.5, NOW, NOW + 1),
+])
+def test_request_window_boundary_uses_completed_time_with_ceil_receipts(
+        tmp_path, provider, offset, expected_end, receipt):
+    """Exercise real runtime/archive/provider validation with only HTTP faked."""
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlsplit
+    from atlas.collection.archive import acquire_collection_once
+
+    config = config_for(tmp_path, providers=[provider])
+    clock = Clock(NOW - 120)
+    init_runtime(config, clock=clock)
+    clock.value = NOW + offset
+    requests, results = [], []
+
+    def get(url, headers, **options):
+        parsed = urlsplit(url)
+        query = parse_qs(parsed.query)
+        requests.append(parsed.path)
+        if parsed.path.endswith("/calendar"):
+            body = [{"date": "2026-09-14", "open": "09:30", "close": "16:00"}]
+        elif parsed.path.endswith("/quotes/latest"):
+            body = {"quotes": {}}
+        elif parsed.path.endswith("/book"):
+            body = {"sequence": 1, "bids": [["100", "1", 1]], "asks": [["101", "1", 1]],
+                    "time": datetime.fromtimestamp(int(clock.value), timezone.utc).isoformat()}
+        else:
+            start, end = (int(datetime.fromisoformat(query[key][0].replace("Z", "+00:00")).timestamp())
+                          for key in ("start", "end"))
+            if provider == "alpaca":
+                # The Alpaca request expresses its exclusive end as end - 1.
+                end += 1
+                bars = [{"t": datetime.fromtimestamp(t, timezone.utc).isoformat(),
+                         "o": 100, "h": 102, "l": 99, "c": 101, "v": 12}
+                        for t in range(start, end, 300)]
+                body = {"bars": {symbol: bars for symbol in ("SPY", "QQQ", "GLD", "USO")},
+                        "next_page_token": None}
+            else:
+                body = [[t, 99, 102, 100, 101, 12] for t in range(start, end, 300)]
+            assert end == expected_end
+        return SimpleNamespace(status=200, body=json.dumps(body).encode())
+
+    def acquire(root, **kwargs):
+        # An injected transport requires no credential file and remains TEST.
+        kwargs["key_file"] = None
+        result = acquire_collection_once(root, transport=get, **kwargs)
+        results.append(result)
+        return result
+
+    run(config, once=True, clock=clock, acquire=acquire, log=lambda *a, **k: None)
+    assert len(results) == 1 and results[0]["collection_complete"] is True, results
+    assert len(requests) == (3 if provider == "alpaca" else 2)
+    state = snapshot(config)
+    assert state["providers"][provider]["failures"] == 0
+    assert state["providers"][provider]["last_success_at"] == receipt
+    with connection(config["state_dir"]) as db:
+        assert db.execute("SELECT count(*) FROM events WHERE kind IN ('request_failed','reconnected')").fetchone()[0] == 0
+    rows = []
+    for path in Path(config["archive_dir"]).glob("days/*/archive.sqlite3"):
+        with sqlite3.connect(path) as db:
+            rows.extend(json.loads(body) for (body,) in db.execute("SELECT body FROM observations"))
+    assert rows and all(row["acquisition_kind"] == "test" for row in rows)
+    assert {row["ingestion_time"] for row in rows} == {receipt}
+    assert max(row["event_time"] for row in rows if row["record_type"] == "bar") == expected_end
+
+
 def test_sqlite_crash_rollback_precedes_readonly_verification(tmp_path):
     config, clock = initialized(tmp_path)
     path = Path(config["state_dir"]) / "state.sqlite3"

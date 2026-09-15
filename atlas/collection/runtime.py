@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -11,7 +12,7 @@ import time
 
 from atlas.collection.config import CollectionError, check_environment, contract_fingerprint, private, validate_config
 from atlas.collection.state import (
-    apply_restore_marker, connection, event, file_lock, gap, initialize_state, metadata,
+    apply_restore_marker, clock_sample, connection, event, file_lock, gap, initialize_state, metadata,
     provider_state, save_metadata, save_provider, snapshot, sync_dir, utc_now,
 )
 
@@ -269,7 +270,8 @@ def run(config, *, once=False, stop_event=None, clock=None, acquire=None,
         try:
             while not stop.is_set():
                 check_environment()
-                now = utc_now(clock)
+                sampled_time = clock_sample(clock)
+                now = math.ceil(sampled_time)
                 if shutil.disk_usage(config["state_dir"]).free < config["min_free_bytes"]:
                     raise CollectionError("collector_disk_reserve_exhausted")
                 current = snapshot(config, thorough=False)
@@ -281,7 +283,8 @@ def run(config, *, once=False, stop_event=None, clock=None, acquire=None,
                     state = current["providers"][provider]
                     if now < state["next_attempt_at"]:
                         continue
-                    end = now // 300 * 300
+                    # Receipt time rounds up; a completed window must not.
+                    end = math.floor(sampled_time) // 300 * 300
                     start = end - config["overlap_seconds"]
                     ok = _attempt(config, provider, start, end, recovery=False,
                                   acquire=acquire, clock=clock, log=log)

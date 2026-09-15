@@ -54,6 +54,11 @@ backoff reaches 3,600 seconds; parsed Retry-After is a minimum up to 86,400 seco
 The HTTPS clients refuse redirects and non-allowlisted paths, bound pages and
 response bytes, and time out. Provider failures do not log credentials or raw text.
 
+Request windows use the floor of the actual wall-clock sample before selecting
+the latest completed five-minute boundary. Operational and ingestion receipts
+still round upward. This prevents a poll just before a boundary from requesting
+a future window; the provider collector's no-future-data guard remains intact.
+
 An Alpaca quote side with zero price, zero size and a blank exchange is treated
 as unavailable: its exact raw response is retained, no two-sided quote is
 admitted, and valid bars in that response batch remain collectable. Other invalid
