@@ -37,3 +37,42 @@ requirement for a new scheduled backup.
 Private incident evidence is in the external `coinbase-failure-20260917` folder
 under the ATLAS hosting-selection evidence directory. It includes the exact
 failed capture/history, protected-file hashes and bounded archive metadata.
+
+## Deployed repair and independent checker fix
+
+Application commit `1dccf563a84dd8aaad536dc619449650c8176d7f` passed the full
+suite: **3,828 passed, 3 intentional skips, zero failures**. Collector release
+`1b3b55f693e61062` is deployed with all nineteen allowlisted source hashes
+verified and protected configuration unchanged. The minimal release excludes
+order modules.
+
+The first prebaseline checker smoke exposed a separate defect: a full archive
+scan held the collector's snapshot barrier long enough to cause three automatic
+`collector_lock_unavailable` restarts. That failed smoke and its outage evidence
+are preserved. The [operator repair](../ops/collector_validation/README.md) copies
+the archive under a bounded brief barrier, then performs full verification on
+that private consistent copy after releasing the collector. The `assess()` source
+and its strict acceptance criteria remain byte-for-byte unchanged.
+
+All **49 operator regression tests passed**. The actual VM sandbox smoke passed
+with healthy providers, full archive integrity and unchanged collector invocation;
+its barrier lasted 0.192 seconds. At the actual new baseline it lasted 0.098
+seconds. The child ran as the collector UID/GID with zero effective, permitted
+or ambient capabilities. These measurements establish this run's behavior, not
+a guarantee that an OS disk operation can always be interrupted within the budget.
+
+The new immutable baseline is **September 17, 2026 at 04:59:48.940222 UTC**
+(September 16, 9:59:48.940222 PM Pacific), SHA-256
+`3bcde6e059e31b9551abb6062dd7962faa8824d93df64fc9527c40323d05d3f0`.
+Its 7,850 records passed full integrity: 7,746 prospective observations, 104
+historical backfill records and zero TEST records. Both providers were healthy
+without consecutive failures or catchup. The independently read-back baseline
+matches the creation receipt exactly. Prior gaps remain visible.
+
+The earliest possible full-day checkpoint is **September 18 at 04:59:48.940222
+UTC** (September 17, 9:59:48.940222 PM Pacific). The separate VM-native timer
+is enabled and gates final assessment until 86,460 elapsed seconds; it does not
+depend on the Mac. This observation is **PENDING**, not a completed 24-hour PASS.
+Do not modify or restart the collector, VM, configuration or credentials while
+it runs. Actual paper execution, prospective strategy qualification and physical
+Mac-off evidence remain separate and unproven. Live trading remains disabled.

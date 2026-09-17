@@ -1,0 +1,12 @@
+[Unit]
+Description=Gate ATLAS final verification independently of the Mac
+
+[Timer]
+OnCalendar=*-*-* *:00/15:00 UTC
+Persistent=true
+AccuracySec=30s
+RandomizedDelaySec=0
+Unit=atlas-validation-final-20260917-diagnostics.service
+
+[Install]
+WantedBy=timers.target

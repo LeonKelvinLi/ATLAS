@@ -1,0 +1,30 @@
+[Unit]
+Description=ATLAS read-only final validation operator
+After=time-sync.target
+ConditionPathExists=!/var/lib/atlas-final-check-20260917-diagnostics/terminal.json
+
+[Service]
+Type=oneshot
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/atlas-checks-20260917-diagnostics/native_final_check.py
+TimeoutStartSec=480
+KillMode=control-group
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=LIVE_TRADING=false
+Environment=ATLAS_LIVE_TRADING_ENABLED=false
+Environment=ATLAS_LIVE_AUTO_ENABLED=false
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/atlas-operator-20260917-diagnostics /var/lib/atlas-final-check-20260917-diagnostics /run/lock/atlas-validation-20260917-diagnostics.lock
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=192M
+CPUQuota=50%
+TasksMax=24
+LimitNOFILE=128
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal

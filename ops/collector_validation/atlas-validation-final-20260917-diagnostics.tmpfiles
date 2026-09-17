@@ -1,0 +1,2 @@
+# Restore only the root operator lock after boot; never a collector data path.
+f /run/lock/atlas-validation-20260917-diagnostics.lock 0600 root root -
