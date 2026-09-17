@@ -148,6 +148,55 @@ def test_request_failure_retry_checkpoint_and_resume(tmp_path):
     assert len(called) == 1 and state["last_success_at"] == clock.value and state["failures"] == 0
 
 
+def test_zero_capture_http_failure_remains_diagnosable_after_recovery(tmp_path, monkeypatch):
+    from atlas.collection.archive import acquire_collection_once
+    from atlas.research.data_collector import DataCollectorError
+    from atlas.research import data_collector
+    config, clock = initialized(tmp_path)
+    def unavailable(*args, **kwargs):
+        raise DataCollectorError("collector_http_refused", status=503, retry_after_seconds=120)
+    monkeypatch.setattr(data_collector, "_exchange_get", unavailable)
+    logs = []
+    run(config, once=True, clock=clock, acquire=acquire_collection_once,
+        log=lambda *a, **k: logs.append((a, k)))
+    failed = snapshot(config)["providers"]["coinbase"]
+    assert failed["last_error"] == "collector_http_refused"
+    assert failed["next_attempt_at"] == NOW + 120
+    assert not list((Path(config["archive_dir"]) / "days").iterdir())
+    with connection(config["state_dir"]) as db:
+        before = db.execute("SELECT body FROM events WHERE kind='request_failed'").fetchone()[0]
+    diagnostic = json.loads(before)
+    assert diagnostic["error"] == "collector_http_refused"
+    assert diagnostic["request_role"] == "candles"
+    assert diagnostic["http_status"] == 503
+    assert diagnostic["retry_after_seconds"] == diagnostic["retry_in_seconds"] == 120
+    assert diagnostic["duration_seconds"] == 0
+    assert next(k for a, k in logs if a[0] == "request_failed")["error"] == diagnostic["error"]
+    clock.value += 120
+    run(config, once=True, clock=clock, acquire=lambda *a, **k: fake_result(clock, k),
+        log=lambda *a, **k: None)
+    assert snapshot(config)["providers"]["coinbase"]["last_error"] is None
+    with connection(config["state_dir"]) as db:
+        assert db.execute("SELECT body FROM events WHERE kind='request_failed'").fetchone()[0] == before
+        assert db.execute("SELECT COUNT(*) FROM events WHERE kind='reconnected'").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("unsafe", ["PRIVATE_TOKEN", {"PRIVATE_TOKEN": 1}, ["PRIVATE_TOKEN"], True, 1.5])
+def test_failure_diagnostics_never_persist_arbitrary_values(tmp_path, unsafe):
+    config, clock = initialized(tmp_path)
+    logs = []
+    run(config, once=True, clock=clock,
+        acquire=lambda *a, **k: {"collection_complete": False, "error": unsafe,
+            "http_status": unsafe, "request_role": unsafe, "retry_after_seconds": unsafe},
+        log=lambda *a, **k: logs.append((a, k)))
+    with connection(config["state_dir"]) as db:
+        row = json.loads(db.execute("SELECT body FROM events WHERE kind='request_failed'").fetchone()[0])
+    assert row["error"] == "collector_request_or_response_invalid"
+    assert row["http_status"] is row["request_role"] is row["retry_after_seconds"] is None
+    assert row["retry_in_seconds"] == 60
+    assert "PRIVATE_TOKEN" not in json.dumps([row, logs, snapshot(config)])
+
+
 def test_outage_live_first_then_old_data_is_explicit_backfill(tmp_path):
     config, clock = initialized(tmp_path)
     calls = []

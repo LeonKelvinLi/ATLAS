@@ -32,6 +32,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 import hashlib
 import http.client
 import re
+import socket
 import ssl
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -57,6 +58,44 @@ _ISO = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d
 _DECIMAL = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?\Z")
 
 
+REQUEST_ROLES = frozenset({"calendar", "bars", "quotes", "candles", "book"})
+# Owned labels only. Never derive a diagnostic from exception text, class names,
+# a URL, a response body or headers. Runtime uses this same boundary before
+# persisting diagnostics from a possibly injected acquisition implementation.
+COLLECTOR_ERROR_CODES = frozenset({
+    "collector_alpaca_endpoint_refused", "collector_auction_quote_unsupported",
+    "collector_bar_shape_invalid", "collector_book_level_invalid", "collector_book_shape_invalid",
+    "collector_candle_duplicate_or_off_grid", "collector_candle_page_invalid",
+    "collector_candle_shape_invalid", "collector_clock_invalid",
+    "collector_clock_regressed_or_batch_timeout", "collector_credential_file_invalid",
+    "collector_duplicate_or_nonascending_bar", "collector_explicit_key_file_required",
+    "collector_http_refused", "collector_http_response_invalid", "collector_number_invalid",
+    "collector_ohlc_invalid", "collector_pagination_limit_no_partial_bundle",
+    "collector_payload_contract_invalid", "collector_public_endpoint_refused",
+    "collector_quote_shape_invalid", "collector_quote_timestamp_invalid", "collector_quotes_shape_invalid",
+    "collector_repeated_page_token", "collector_request_end_or_contract_is_future",
+    "collector_request_invalid", "collector_request_or_response_invalid", "collector_request_timeout",
+    "collector_response_incomplete_or_timeout", "collector_response_size_invalid",
+    "collector_unrequested_quote_symbol", "collector_unrequested_symbol",
+    "collector_weekend_calendar_session_invalid", "collector_dns_failed",
+    "collector_tls_certificate_failed", "collector_tls_failed", "collector_remote_disconnected",
+    "collector_connection_failed", "collector_network_io_failed", "collector_http_protocol_invalid",
+    "collector_response_incomplete",
+})
+
+
+def safe_failure_diagnostic(code, *, status=None, retry_after_seconds=None, role=None):
+    """Return fixed, primitive failure metadata without reflecting untrusted text."""
+    return {
+        "error": code if type(code) is str and code in COLLECTOR_ERROR_CODES
+                 else "collector_request_or_response_invalid",
+        "http_status": status if type(status) is int and 100 <= status <= 599 else None,
+        "retry_after_seconds": retry_after_seconds if type(retry_after_seconds) is int
+                               and 0 <= retry_after_seconds <= 86400 else None,
+        "request_role": role if type(role) is str and role in REQUEST_ROLES else None,
+    }
+
+
 class DataCollectorError(ValueError):
     """Fixed diagnostic, plus exact completed captures for caller quarantine.
 
@@ -64,13 +103,15 @@ class DataCollectorError(ValueError):
     in ``captures``; they must be stored privately, never logged as diagnostics.
     """
 
-    def __init__(self, code, *, captures=None, status=None, retry_after_seconds=None):
-        super().__init__(code)
-        self.code = code
+    def __init__(self, code, *, captures=None, status=None, retry_after_seconds=None, role=None):
+        diagnostic = safe_failure_diagnostic(code, status=status,
+                                            retry_after_seconds=retry_after_seconds, role=role)
+        super().__init__(diagnostic["error"])
+        self.code = diagnostic["error"]
         self.captures = [dict(capture) for capture in (captures or [])]
-        self.status = status if type(status) is int and 100 <= status <= 599 else None
-        self.retry_after_seconds = (retry_after_seconds if type(retry_after_seconds) is int
-                                    and 0 <= retry_after_seconds <= 86400 else None)
+        self.status = diagnostic["http_status"]
+        self.retry_after_seconds = diagnostic["retry_after_seconds"]
+        self.role = diagnostic["request_role"]
 
 
 def _clock_sample(clock):
@@ -131,12 +172,49 @@ def _exchange_get(url, headers, *, timeout_seconds, max_response_bytes):
                         timeout_seconds=timeout_seconds, max_response_bytes=max_response_bytes)
 
 
+_NETWORK_ERROR_CODES = {
+    TimeoutError: "collector_request_timeout",
+    socket.gaierror: "collector_dns_failed",
+    socket.herror: "collector_dns_failed",
+    ssl.SSLCertVerificationError: "collector_tls_certificate_failed",
+    ssl.SSLError: "collector_tls_failed",
+    ssl.SSLEOFError: "collector_tls_failed",
+    ssl.SSLZeroReturnError: "collector_tls_failed",
+    ssl.SSLWantReadError: "collector_tls_failed",
+    ssl.SSLWantWriteError: "collector_tls_failed",
+    http.client.RemoteDisconnected: "collector_remote_disconnected",
+    ConnectionError: "collector_connection_failed",
+    ConnectionRefusedError: "collector_connection_failed",
+    ConnectionResetError: "collector_connection_failed",
+    ConnectionAbortedError: "collector_connection_failed",
+    BrokenPipeError: "collector_connection_failed",
+    OSError: "collector_network_io_failed",
+    http.client.IncompleteRead: "collector_response_incomplete",
+    http.client.HTTPException: "collector_http_protocol_invalid",
+    http.client.BadStatusLine: "collector_http_protocol_invalid",
+    http.client.LineTooLong: "collector_http_protocol_invalid",
+    http.client.UnknownProtocol: "collector_http_protocol_invalid",
+    http.client.UnknownTransferEncoding: "collector_http_protocol_invalid",
+}
+
+
 def _bounded_get(url, headers, *, target_fn, timeout_seconds, max_response_bytes):
     host, target = target_fn(url)
     connection = http.client.HTTPSConnection(host, timeout=timeout_seconds, context=ssl.create_default_context())
     deadline = time.monotonic() + timeout_seconds
+
+    def remaining_budget():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DataCollectorError("collector_request_timeout")
+        if connection.sock is not None:
+            connection.sock.settimeout(remaining)
+
     try:
         connection.request("GET", target, headers=headers)
+        # The connection/send stage consumes the same budget as headers/body.
+        # Do not grant getresponse() another complete socket timeout.
+        remaining_budget()
         response = connection.getresponse()
         if response.status != 200:  # No redirect following, retries or body logging.
             retry = None
@@ -149,11 +227,7 @@ def _bounded_get(url, headers, *, target_fn, timeout_seconds, max_response_bytes
             raise DataCollectorError("collector_response_size_invalid")
         chunks, size = [], 0
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise DataCollectorError("collector_request_timeout")
-            if connection.sock is not None:
-                connection.sock.settimeout(remaining)
+            remaining_budget()
             chunk = response.read1(min(65536, max_response_bytes + 1 - size))
             if not chunk:
                 break
@@ -165,6 +239,13 @@ def _bounded_get(url, headers, *, target_fn, timeout_seconds, max_response_bytes
         if time.monotonic() > deadline or (length is not None and len(body) != int(length)):
             raise DataCollectorError("collector_response_incomplete_or_timeout")
         return HTTPResponse(response.status, body)
+    except DataCollectorError:
+        raise
+    except Exception as exc:
+        # Exact built-in classes only; subclasses and exception messages remain
+        # untrusted. A single failed GET remains a failed GET, without retries.
+        raise DataCollectorError(_NETWORK_ERROR_CODES.get(
+            type(exc), "collector_request_or_response_invalid")) from None
     finally:
         connection.close()
 
@@ -327,9 +408,11 @@ def collect_once(contract, *, provider, start, end, key_file=None, transport=Non
             headers.update({"APCA-API-KEY-ID": credential.api_key, "APCA-API-SECRET-KEY": credential.api_secret})
     getter = transport if transport is not None else (alpaca_get if provider == "alpaca" else _exchange_get)
     captures, records, coverage = [], [], []
+    active_role = None
 
     def capture(role, url):
-        nonlocal previous
+        nonlocal previous, active_role
+        active_role = role
         try:
             (_alpaca_target if provider == "alpaca" else _exchange_target)(url)
             try:
@@ -337,10 +420,14 @@ def collect_once(contract, *, provider, start, end, key_file=None, transport=Non
             except DataCollectorError as exc:
                 # Only our built-in transport may export its fixed error codes.
                 # Injected exceptions remain untrusted even if they use this class.
-                if transport is None:
+                if transport is None and type(exc) is DataCollectorError:
                     raise
+                metadata = (safe_failure_diagnostic(None, status=exc.status,
+                    retry_after_seconds=exc.retry_after_seconds) if type(exc) is DataCollectorError
+                    else safe_failure_diagnostic(None))
                 raise DataCollectorError("collector_request_or_response_invalid",
-                    status=exc.status, retry_after_seconds=exc.retry_after_seconds) from None
+                    status=metadata["http_status"],
+                    retry_after_seconds=metadata["retry_after_seconds"]) from None
             except Exception:
                 # A test transport may raise our own class with arbitrary text.
                 # Only locally produced diagnostics may escape this boundary.
@@ -439,12 +526,17 @@ def collect_once(contract, *, provider, start, end, key_file=None, transport=Non
             raw, receipt = capture("book", BOOK_URL)
             records.append(_quote(raw, receipt, contract, is_test))
         # Validation deliberately retains unknown/stale evidence as blockers.
+        # This pass spans all responses; the last fetched endpoint does not
+        # identify which record caused a cross-record contract failure.
+        active_role = None
         records = [validate_record(row, contract, _ceil(previous))["record"] for row in records]
     except DataCollectorError as exc:
         raise DataCollectorError(exc.code, captures=captures, status=exc.status,
-                                 retry_after_seconds=exc.retry_after_seconds) from None
+                                 retry_after_seconds=exc.retry_after_seconds,
+                                 role=active_role) from None
     except Exception:
-        raise DataCollectorError("collector_payload_contract_invalid", captures=captures) from None
+        raise DataCollectorError("collector_payload_contract_invalid", captures=captures,
+                                 role=active_role) from None
     records.sort(key=lambda row: (row["event_time"], row["symbol"], row["record_type"]))
     return {"records": records, "captures": captures, "calendar_coverage": coverage,
             "provenance": "injected_test_transport_or_clock" if is_test else

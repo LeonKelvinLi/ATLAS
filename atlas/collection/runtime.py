@@ -11,6 +11,7 @@ import threading
 import time
 
 from atlas.collection.config import CollectionError, check_environment, contract_fingerprint, private, validate_config
+from atlas.research.data_collector import safe_failure_diagnostic
 from atlas.collection.state import (
     apply_restore_marker, clock_sample, connection, event, file_lock, gap, initialize_state, metadata,
     provider_state, save_metadata, save_provider, snapshot, sync_dir, utc_now,
@@ -188,6 +189,7 @@ def _attempt(config, provider, start, end, *, recovery, acquire, clock, log):
         completed = utc_now(clock)
         if completed < now:
             raise CollectionError("collector_clock_regressed")
+        failure_fields = {}
         with connection(config["state_dir"], write=True) as db:
             state, meta = provider_state(db, provider), metadata(db)
             if result.get("collection_complete") is True:
@@ -204,19 +206,29 @@ def _attempt(config, provider, start, end, *, recovery, acquire, clock, log):
                 outcome = "reconnected" if reconnected else "request_succeeded"
             else:
                 state["failures"] += 1
-                # Do not reflect exception text, URLs, headers, or remote bodies.
-                state["last_error"] = "provider_acquisition_failed"
+                # Exact owned codes and bounded primitives survive recovery in
+                # append-only events, even when HTTP failed before any capture.
+                # Never reflect exception text, URLs, headers or remote bodies.
+                diagnostic = safe_failure_diagnostic(result.get("error"),
+                    status=result.get("http_status"),
+                    retry_after_seconds=result.get("retry_after_seconds"),
+                    role=result.get("request_role"))
+                state["last_error"] = diagnostic["error"]
                 delay = backoff_seconds(state["failures"], poll_seconds=config["poll_seconds"],
-                    maximum=config["max_backoff_seconds"], retry_after=result.get("retry_after_seconds"))
+                    maximum=config["max_backoff_seconds"], retry_after=diagnostic["retry_after_seconds"])
                 state["next_attempt_at"] = completed + delay
                 meta["continuous_since"] = None
-                event(db, completed, "request_failed", provider, failures=state["failures"], retry_in_seconds=delay)
+                failure_fields = {"diagnostic_version": 1, **diagnostic,
+                    "duration_seconds": completed - now, "failures": state["failures"],
+                    "retry_in_seconds": delay}
+                event(db, completed, "request_failed", provider, **failure_fields)
                 outcome = "request_failed"
             meta["heartbeat_at"] = completed
             save_provider(db, provider, state)
             save_metadata(db, meta)
         log(outcome, completed, provider=provider, recovery=recovery,
-            appended_records=result.get("appended_records", 0), next_attempt_at=state["next_attempt_at"])
+            appended_records=result.get("appended_records", 0), next_attempt_at=state["next_attempt_at"],
+            **failure_fields)
     return result.get("collection_complete") is True
 
 

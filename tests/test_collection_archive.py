@@ -124,6 +124,7 @@ def test_provider_failure_quarantines_receipt_without_observations(root):
         return HTTPResponse(200,b'provider invalid JSON')
     result=archive.acquire_collection_once(root,provider='coinbase',start=NOW-600,end=NOW-300,transport=get,clock=lambda:NOW)
     assert not result['collection_complete'] and result['captures_retained']==1
+    assert result['request_role']=='candles'
     assert archive.verify_collection_archive(root)['record_count']==0
 
 
@@ -131,6 +132,7 @@ def test_http_rate_limit_metadata_preserved(root):
     result=archive.acquire_collection_once(root,provider='coinbase',start=NOW-600,end=NOW-300,
         transport=lambda *a,**k:HTTPResponse(429,b'',{'Retry-After':'120'}),clock=lambda:NOW)
     assert result['http_status']==429 and result['retry_after_seconds']==120
+    assert result['request_role']=='candles'
     assert result['appended_records']==0
 
 

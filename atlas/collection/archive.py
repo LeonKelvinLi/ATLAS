@@ -16,7 +16,7 @@ import sqlite3
 from atlas.collection.primitives import _encoded, _external_path, _json, _read, _sha, _sync_dir
 from atlas.research import data_archive as store
 from atlas.research.data_contract_v1 import validate_contract
-from atlas.research.data_collector import collect_once, DataCollectorError
+from atlas.research.data_collector import collect_once, DataCollectorError, safe_failure_diagnostic
 
 MAX_DAYS = 3650
 CATALOG_SQL = "CREATE TABLE partitions(day TEXT PRIMARY KEY, created_at INTEGER NOT NULL)"
@@ -217,10 +217,10 @@ def acquire_collection_once(root, *, provider, start, end, key_file=None, transp
                                   key_file=key_file, transport=transport, clock=clock)
             failure = None
         except DataCollectorError as exc:
+            failure = safe_failure_diagnostic(exc.code, status=exc.status,
+                retry_after_seconds=exc.retry_after_seconds, role=exc.role)
             bundle = {"records": [], "captures": exc.captures, "calendar_coverage": [],
-                      "provenance": "collection_failed:" + exc.code}
-            failure = {"error": exc.code, "retry_after_seconds": getattr(exc, "retry_after_seconds", None),
-                       "http_status": getattr(exc, "status", None)}
+                      "provenance": "collection_failed:" + failure["error"]}
         current = store.receipt_time(clock)
         grouped = {}
         for row in bundle["records"]:

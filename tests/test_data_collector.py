@@ -543,3 +543,163 @@ def test_builtin_get_bounds_response_and_content_length(monkeypatch, body, lengt
     with pytest.raises(DataCollectorError):
         module._exchange_get(module.BOOK_URL, {}, timeout_seconds=10, max_response_bytes=limit)
     assert calls == ["open", "close"]
+
+
+@pytest.mark.parametrize("error,code", [
+    (TimeoutError("private transport detail"), "collector_request_timeout"),
+    (module.socket.gaierror("private transport detail"), "collector_dns_failed"),
+    (module.ssl.SSLCertVerificationError("private transport detail"), "collector_tls_certificate_failed"),
+    (module.ssl.SSLError("private transport detail"), "collector_tls_failed"),
+    (module.http.client.RemoteDisconnected("private transport detail"), "collector_remote_disconnected"),
+    (ConnectionResetError("private transport detail"), "collector_connection_failed"),
+    (ConnectionRefusedError("private transport detail"), "collector_connection_failed"),
+    (BrokenPipeError("private transport detail"), "collector_connection_failed"),
+    (OSError("private transport detail"), "collector_network_io_failed"),
+    (module.http.client.IncompleteRead(b"private transport detail"), "collector_response_incomplete"),
+    (module.http.client.BadStatusLine("private transport detail"), "collector_http_protocol_invalid"),
+    (RuntimeError("private transport detail"), "collector_request_or_response_invalid"),
+])
+@pytest.mark.parametrize("stage", ["request", "headers", "body"])
+def test_builtin_network_failure_keeps_fixed_category_role_and_single_attempt(monkeypatch, error, code, stage):
+    calls = []
+
+    def fail(where):
+        calls.append(where)
+        if where == stage:
+            raise error
+
+    class Response:
+        status = 200
+        def getheader(self, name):
+            return None
+        def read1(self, limit):
+            fail("body")
+            return b""
+
+    class Connection:
+        sock = None
+        def __init__(self, host, **kwargs):
+            calls.append("open")
+        def request(self, method, target, **kwargs):
+            assert method == "GET"
+            fail("request")
+        def getresponse(self):
+            fail("headers")
+            return Response()
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(module.http.client, "HTTPSConnection", Connection)
+    monkeypatch.setattr(module.time, "time", lambda: NOW)
+    with pytest.raises(DataCollectorError) as caught:
+        collect_once(contract(), provider="coinbase", start=START, end=END)
+    assert caught.value.code == code
+    assert caught.value.role == "candles"
+    assert caught.value.captures == []
+    assert caught.value.status is None and caught.value.retry_after_seconds is None
+    assert "private transport detail" not in str(caught.value)
+    assert calls.count("open") == calls.count("request") == calls.count("close") == 1
+
+
+@pytest.mark.parametrize("request_elapsed,headers_allowed", [(8, True), (10, False), (11, False)])
+def test_header_wait_receives_only_remaining_request_budget(monkeypatch, request_elapsed, headers_allowed):
+    elapsed = [0]
+    calls, timeouts = [], []
+
+    class Connection:
+        sock = SimpleNamespace(settimeout=lambda value: timeouts.append(value))
+        def __init__(self, *args, **kwargs):
+            assert kwargs["timeout"] == 10
+        def request(self, *args, **kwargs):
+            elapsed[0] = request_elapsed
+        def getresponse(self):
+            calls.append("headers")
+            assert timeouts[-1] == 10 - request_elapsed
+            raise TimeoutError("private header detail")
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(module.http.client, "HTTPSConnection", Connection)
+    with pytest.raises(DataCollectorError, match="^collector_request_timeout$"):
+        module._exchange_get(module.BOOK_URL, {}, timeout_seconds=10, max_response_bytes=100)
+    assert calls == (["headers", "close"] if headers_allowed else ["close"])
+    assert timeouts == ([2] if headers_allowed else [])
+
+
+def test_injected_error_subclass_cannot_export_properties_or_class_name():
+    class PrivateSecretError(DataCollectorError):
+        def __init__(self):
+            ValueError.__init__(self, "private diagnostic detail")
+        @property
+        def status(self):
+            pytest.fail("injected error accessor must not be called")
+        @property
+        def retry_after_seconds(self):
+            pytest.fail("injected error accessor must not be called")
+
+    with pytest.raises(DataCollectorError) as caught:
+        collect([PrivateSecretError()])
+    assert caught.value.code == "collector_request_or_response_invalid"
+    assert caught.value.role == "candles"
+    assert caught.value.status is None and caught.value.retry_after_seconds is None
+    assert "PrivateSecretError" not in repr(caught.value)
+
+
+def test_injected_error_cannot_select_role_or_export_owned_network_category():
+    error = DataCollectorError("collector_dns_failed", status=429, retry_after_seconds=7, role="quotes")
+    with pytest.raises(DataCollectorError) as caught:
+        collect([[], error])
+    assert caught.value.code == "collector_request_or_response_invalid"
+    assert caught.value.role == "book"
+    assert caught.value.status == 429 and caught.value.retry_after_seconds == 7
+    assert len(caught.value.captures) == 1
+
+
+@pytest.mark.parametrize("responses,role,captures", [
+    ([b"not JSON"], "candles", 1),
+    ([[], {"bids": []}], "book", 2),
+])
+def test_invalid_payload_role_retains_exact_completed_capture_quarantine(responses, role, captures):
+    with pytest.raises(DataCollectorError) as caught:
+        collect(responses)
+    assert caught.value.role == role
+    assert len(caught.value.captures) == captures
+    assert not hasattr(caught.value, "records")
+
+
+def test_common_contract_failure_does_not_blame_last_fetched_endpoint(monkeypatch):
+    def reject_bar(record, *args):
+        assert record["record_type"] == "bar"
+        raise ValueError("private contract detail")
+    monkeypatch.setattr(module, "validate_record", reject_bar)
+    with pytest.raises(DataCollectorError) as caught:
+        collect([[candle()], book()])
+    assert caught.value.code == "collector_payload_contract_invalid"
+    assert caught.value.role is None
+    assert [c["role"] for c in caught.value.captures] == ["candles", "book"]
+    assert "private contract detail" not in str(caught.value)
+
+
+def test_diagnostic_boundary_accepts_only_owned_labels_and_exact_primitives():
+    class Hostile:
+        def __str__(self):
+            pytest.fail("untrusted values must not be converted")
+        def __hash__(self):
+            pytest.fail("untrusted values must not be hashed")
+        def __eq__(self, other):
+            pytest.fail("untrusted values must not be compared")
+
+    hostile = Hostile()
+    assert module.safe_failure_diagnostic(hostile, status=hostile,
+        retry_after_seconds=hostile, role=hostile) == {
+            "error": "collector_request_or_response_invalid", "http_status": None,
+            "retry_after_seconds": None, "request_role": None}
+    assert module.safe_failure_diagnostic("collector_http_refused", status=503,
+        retry_after_seconds=86400, role="book") == {
+            "error": "collector_http_refused", "http_status": 503,
+            "retry_after_seconds": 86400, "request_role": "book"}
+    diagnostic = module.safe_failure_diagnostic("private detail", status=True,
+        retry_after_seconds=86401, role="private detail")
+    assert diagnostic == {"error": "collector_request_or_response_invalid", "http_status": None,
+                          "retry_after_seconds": None, "request_role": None}
